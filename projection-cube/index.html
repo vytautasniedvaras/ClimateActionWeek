@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BYO — Projected Cube</title>
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: #ffffff;
+      overflow: hidden;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+      cursor: pointer;
+    }
+    #scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+    .hint {
+      position: fixed; left: 14px; bottom: 12px;
+      font-size: 12px; letter-spacing: 0.02em; color: #9aa0a6;
+      user-select: none; pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div class="hint">click anywhere to change the words · text is projected onto an invisible, slowly rocking cube</div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
+  <script src="word-pairings.js"></script>
+  <script>
+  (function () {
+
+    /* ================================================================
+       CONFIG — also editable live via the GUI panel (top-right)
+       ================================================================ */
+    const CONFIG = {
+      // --- the invisible cube ---
+      cubeSize:    1.15,   // half-extent of the cube (world units)
+      strength:    1.7,    // how far the text is pushed toward the camera onto the front faces
+      edgeBand:    0.55,   // width of the seam where projected text eases back to flat (world units of chord)
+
+      // --- motion ---
+      spinSpeed:   0.22,   // continuous turn about the vertical axis (rad/s)
+      tiltAmp:     0.42,   // amplitude of the back-and-forth rocking (rad)
+      tiltSpeed:   0.55,   // rocking speed (rad/s)
+      rollAmp:     0.14,   // gentle secondary wobble about the view axis (rad)
+      rollSpeed:   0.37,
+
+      // --- text ---
+      fontScale:   0.135,  // line height as a fraction of the text-canvas height
+      autoCycle:   0.0     // seconds between automatic word changes (0 = off, change on click)
+    };
+    /* ================================================================ */
+
+    const data  = window.WORD_DATA;
+    const nouns = data.nouns;
+
+    // ---------- SDG colour palette ----------
+    const sdgColors = [
+      '#E5233D', '#DDA73A', '#4CA146', '#C5192D', '#EF402C', '#27BFE6',
+      '#FBC412', '#A31C44', '#F26A2D', '#E01483', '#F89D2A', '#BF8D2C',
+      '#407F46', '#1F97D4', '#59BA48', '#126A9F', '#13496B'
+    ];
+    const randColor = () => sdgColors[Math.floor(Math.random() * sdgColors.length)];
+    const contrast  = ex => { const a = sdgColors.filter(c => c !== ex); return a[Math.floor(Math.random() * a.length)]; };
+
+    // ---------- content state ----------
+    let nounIndex = 0, verbIndex = 0;
+    let nounColor = randColor(), verbColor = contrast(nounColor);
+
+    // ================================================================
+    //  TEXT TEXTURE  — the three flat title lines, drawn onto a canvas
+    // ================================================================
+    const texCanvas = document.createElement('canvas');
+    const tctx = texCanvas.getContext('2d');
+    const texture = new THREE.CanvasTexture(texCanvas);
+    texture.anisotropy = 8;
+    texture.minFilter = THREE.LinearFilter;
+
+    // sized to match the screen aspect so text is never stretched
+    function sizeTextCanvas() {
+      const aspect = window.innerWidth / window.innerHeight;
+      texCanvas.width  = 2200;
+      texCanvas.height = Math.round(2200 / aspect);
+    }
+
+    function drawText() {
+      const W = texCanvas.width, H = texCanvas.height;
+      tctx.clearRect(0, 0, W, H);
+
+      const n    = nouns[nounIndex];
+      const verb = n.verbs[verbIndex % n.verbs.length].toUpperCase();
+      const lines = [
+        [ { t: 'BYO ',     c: '#000' }, { t: n.word,   c: nounColor } ],
+        [ { t: 'HOW CAN ', c: '#000' }, { t: n.plural, c: nounColor } ],
+        [ { t: verb + ' ', c: verbColor }, { t: 'SCIENCE', c: '#000' } ]
+      ];
+
+      const fontPx = Math.round(H * CONFIG.fontScale);
+      const lineH  = fontPx * 0.98;
+      tctx.textBaseline = 'middle';
+      tctx.textAlign = 'left';
+      tctx.font = `800 ${fontPx}px Inter, Arial, sans-serif`;
+      if ('letterSpacing' in tctx) tctx.letterSpacing = `${(-0.04 * fontPx).toFixed(2)}px`;
+
+      const marginX = W * 0.045;
+      const blockH  = lineH * lines.length;
+      let y = (H - blockH) / 2 + lineH / 2;
+
+      for (const segs of lines) {
+        let x = marginX;
+        for (const s of segs) {
+          tctx.fillStyle = s.c;
+          tctx.fillText(s.t, x, y);
+          x += tctx.measureText(s.t).width;
+        }
+        y += lineH;
+      }
+      texture.needsUpdate = true;
+    }
+
+    function cycleNoun() {
+      nounIndex = (nounIndex + 1) % nouns.length;
+      nounColor = randColor(); verbIndex = 0; verbColor = contrast(nounColor);
+      drawText();
+    }
+
+    // ================================================================
+    //  THREE.JS SCENE
+    // ================================================================
+    const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('scene'), antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    const scene  = new THREE.Scene();
+    const CAM_FOV = 45, CAM_DIST = 6;
+    const camera = new THREE.PerspectiveCamera(CAM_FOV, 1, 0.1, 100);
+    camera.position.set(0, 0, CAM_DIST);
+    camera.lookAt(0, 0, 0);
+
+    // --- displacement shader -------------------------------------------------
+    // For every vertex of a flat plane we shoot a ray straight along the view
+    // axis (world -Z) and intersect it with the invisible, rotating cube.
+    // Inside the cube's silhouette the vertex is lifted onto the cube's FRONT
+    // surface (orthographic projection -> clean facets). The lift is faded out
+    // across `edgeBand` near the silhouette (where the chord through the cube
+    // shrinks to zero), so projected and un-projected text meet seamlessly.
+    const vertexShader = `
+      uniform mat3  uRotInv;   // inverse of the cube's current rotation
+      uniform vec3  uHalf;     // cube half-extents
+      uniform float uStrength;
+      uniform float uEdgeBand;
+      varying vec2  vUv;
+
+      void main() {
+        vec3 wp = (modelMatrix * vec4(position, 1.0)).xyz;
+
+        // World column through this vertex, parameterised by world-Z (= t).
+        // P(t) = (wp.x, wp.y, t);  in cube space: Rinv * P(t).
+        vec3 lo = uRotInv * vec3(wp.x, wp.y, 0.0);   // local origin (t = 0)
+        vec3 ld = uRotInv * vec3(0.0, 0.0, 1.0);     // local direction per unit t
+
+        // avoid division by zero for axis-aligned moments
+        vec3 safe = vec3(
+          abs(ld.x) < 1e-5 ? 1e-5 : ld.x,
+          abs(ld.y) < 1e-5 ? 1e-5 : ld.y,
+          abs(ld.z) < 1e-5 ? 1e-5 : ld.z
+        );
+
+        vec3 t1 = (-uHalf - lo) / safe;
+        vec3 t2 = ( uHalf - lo) / safe;
+        vec3 tmin = min(t1, t2);
+        vec3 tmax = max(t1, t2);
+        float tlo = max(max(tmin.x, tmin.y), tmin.z);   // back surface world-Z
+        float thi = min(min(tmax.x, tmax.y), tmax.z);   // front surface world-Z
+
+        float z = wp.z;
+        if (thi > tlo) {
+          float chord = thi - tlo;                       // cube thickness along the column
+          float mask  = smoothstep(0.0, uEdgeBand, chord);
+          z = mix(wp.z, thi * uStrength, mask);          // lift onto the front face
+        }
+
+        vUv = uv;
+        gl_Position = projectionMatrix * viewMatrix * vec4(wp.x, wp.y, z, 1.0);
+      }
+    `;
+
+    const fragmentShader = `
+      uniform sampler2D uTex;
+      varying vec2 vUv;
+      void main() {
+        vec4 c = texture2D(uTex, vUv);
+        if (c.a < 0.01) discard;
+        gl_FragColor = c;
+      }
+    `;
+
+    const uniforms = {
+      uTex:      { value: texture },
+      uRotInv:   { value: new THREE.Matrix3() },
+      uHalf:     { value: new THREE.Vector3(CONFIG.cubeSize, CONFIG.cubeSize, CONFIG.cubeSize) },
+      uStrength: { value: CONFIG.strength },
+      uEdgeBand: { value: CONFIG.edgeBand }
+    };
+
+    const material = new THREE.ShaderMaterial({
+      uniforms, vertexShader, fragmentShader,
+      transparent: true, side: THREE.DoubleSide
+    });
+
+    let plane = null;
+    function buildPlane() {
+      if (plane) { plane.geometry.dispose(); scene.remove(plane); }
+      const aspect  = window.innerWidth / window.innerHeight;
+      const visH = 2 * CAM_DIST * Math.tan((CAM_FOV * Math.PI / 180) / 2);
+      const visW = visH * aspect;
+      const W = visW * 1.12, H = visH * 1.12;
+      const segX = 240, segY = Math.max(40, Math.round(240 / aspect));
+      const geo = new THREE.PlaneGeometry(W, H, segX, segY);
+      plane = new THREE.Mesh(geo, material);
+      scene.add(plane);
+    }
+
+    // ---------- cube rotation, rebuilt each frame ----------
+    const rotM4   = new THREE.Matrix4();
+    const rotM4i  = new THREE.Matrix4();
+    const euler   = new THREE.Euler();
+    function updateRotation(time) {
+      euler.set(
+        CONFIG.tiltAmp * Math.sin(time * CONFIG.tiltSpeed),   // rock back & forth (X)
+        time * CONFIG.spinSpeed,                              // continuous spin (Y)
+        CONFIG.rollAmp * Math.sin(time * CONFIG.rollSpeed)    // gentle wobble (Z)
+      );
+      rotM4.makeRotationFromEuler(euler);
+      rotM4i.copy(rotM4).invert();
+      uniforms.uRotInv.value.setFromMatrix4(rotM4i);
+    }
+
+    // ================================================================
+    //  INTERACTION
+    // ================================================================
+    window.addEventListener('click', cycleNoun);
+    window.addEventListener('touchstart', e => { e.preventDefault(); cycleNoun(); }, { passive: false });
+
+    let autoTimer = 0;
+
+    // ================================================================
+    //  RENDER LOOP
+    // ================================================================
+    const clock = new THREE.Clock();
+    function animate() {
+      requestAnimationFrame(animate);
+      const dt = clock.getDelta();
+      const t  = clock.elapsedTime;
+
+      if (CONFIG.autoCycle > 0) {
+        autoTimer += dt;
+        if (autoTimer >= CONFIG.autoCycle) { autoTimer = 0; cycleNoun(); }
+      }
+
+      updateRotation(t);
+      uniforms.uStrength.value = CONFIG.strength;
+      uniforms.uEdgeBand.value = CONFIG.edgeBand;
+      uniforms.uHalf.value.set(CONFIG.cubeSize, CONFIG.cubeSize, CONFIG.cubeSize);
+
+      renderer.render(scene, camera);
+    }
+
+    // ================================================================
+    //  RESIZE
+    // ================================================================
+    function resize() {
+      const w = window.innerWidth, h = window.innerHeight;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      sizeTextCanvas();
+      drawText();
+      buildPlane();
+    }
+    window.addEventListener('resize', resize);
+    resize();
+    animate();
+
+    // ================================================================
+    //  GUI
+    // ================================================================
+    const gui = new dat.GUI({ width: 300 });
+
+    const fCube = gui.addFolder('Invisible cube');
+    fCube.add(CONFIG, 'cubeSize', 0.4, 2.4, 0.01).name('size');
+    fCube.add(CONFIG, 'strength', 0.5, 3.5, 0.01).name('projection depth');
+    fCube.add(CONFIG, 'edgeBand', 0.05, 1.5, 0.01).name('seam softness');
+    fCube.open();
+
+    const fMotion = gui.addFolder('Motion');
+    fMotion.add(CONFIG, 'spinSpeed', 0, 1.2, 0.01).name('spin speed');
+    fMotion.add(CONFIG, 'tiltAmp', 0, 1.2, 0.01).name('rock amount');
+    fMotion.add(CONFIG, 'tiltSpeed', 0, 1.5, 0.01).name('rock speed');
+    fMotion.add(CONFIG, 'rollAmp', 0, 0.6, 0.01).name('wobble amount');
+    fMotion.add(CONFIG, 'rollSpeed', 0, 1.5, 0.01).name('wobble speed');
+    fMotion.open();
+
+    const fText = gui.addFolder('Text');
+    fText.add(CONFIG, 'fontScale', 0.06, 0.26, 0.005).name('font size').onChange(drawText);
+    fText.add(CONFIG, 'autoCycle', 0, 6, 0.5).name('auto-change (s)');
+    fText.open();
+  })();
+  </script>
+</body>
+</html>
