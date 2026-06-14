@@ -32,9 +32,8 @@
     const CONFIG = {
       // --- the invisible cube ---
       cubeSize:      1.15,   // base half-extent of the cube (world units; the gizmo scales on top)
-      strength:      1.35,   // how far the text is pushed onto the cube's front faces
-      maxLift:       2.6,    // clamp on the forward push (keeps big scales from flinging text at the camera)
-      edgeBand:      0.6,    // seam width where projected text eases back to flat
+      projection:    0.3,    // ONE control: depth, clamp & seam are derived from this so it stays
+                             //   seamless across the whole range (see deriveProjection)
       facingCut:     0.2,    // drop triangles steeper than this (kills the edge-on glow; keeps colour flat)
 
       // --- motion (mouse-driven "heading", with momentum into a slow idle spin) ---
@@ -285,12 +284,23 @@
       uTex:      { value: texture },
       uCamPos:   { value: new THREE.Vector3(0, 0, CAM_DIST) },
       uFacingCut:{ value: CONFIG.facingCut },
-      uMaxLift:  { value: CONFIG.maxLift },
+      uMaxLift:  { value: 0 },
       uCubeInv:  { value: new THREE.Matrix4() },
       uHalf:     { value: new THREE.Vector3(CONFIG.cubeSize, CONFIG.cubeSize, CONFIG.cubeSize) },
-      uStrength: { value: CONFIG.strength },
-      uEdgeBand: { value: CONFIG.edgeBand }
+      uStrength: { value: 0 },
+      uEdgeBand: { value: 0 }
     };
+
+    // ONE knob -> depth, clamp and seam, coupled so the projection meets the
+    // flat text seamlessly at every setting. Deeper push widens the seam (and
+    // raises the clamp) at the same rate, so the silhouette never pops.
+    function deriveProjection() {
+      const p = CONFIG.projection;                 // 0 (flush) .. 1 (deep)
+      uniforms.uStrength.value = 0.70 + 2.30 * p;  // forward push factor
+      uniforms.uEdgeBand.value = 0.30 + 0.85 * p;  // seam fade width (world chord units)
+      uniforms.uMaxLift.value  = 1.40 + 2.60 * p;  // clamp so big scales can't fling text forward
+    }
+    deriveProjection();
 
     const material = new THREE.ShaderMaterial({
       uniforms, vertexShader, fragmentShader,
@@ -457,10 +467,8 @@
       cube.updateMatrixWorld();
       uniforms.uCubeInv.value.copy(cube.matrixWorld).invert();
       uniforms.uHalf.value.set(CONFIG.cubeSize, CONFIG.cubeSize, CONFIG.cubeSize);
-      uniforms.uStrength.value = CONFIG.strength;
-      uniforms.uEdgeBand.value = CONFIG.edgeBand;
+      deriveProjection();
       uniforms.uFacingCut.value = CONFIG.facingCut;
-      uniforms.uMaxLift.value = CONFIG.maxLift;
 
       renderer.render(scene, camera);
     }
@@ -500,9 +508,7 @@
 
     const fCube = gui.addFolder('Invisible cube');
     fCube.add(CONFIG, 'cubeSize', 0.4, 2.4, 0.01).name('size').onChange(buildGuide);
-    fCube.add(CONFIG, 'strength', 0.5, 3.5, 0.01).name('projection depth');
-    fCube.add(CONFIG, 'maxLift', 0.5, 4.0, 0.05).name('max forward push');
-    fCube.add(CONFIG, 'edgeBand', 0.05, 1.5, 0.01).name('seam softness');
+    fCube.add(CONFIG, 'projection', 0, 1, 0.01).name('projection');
     fCube.add(CONFIG, 'facingCut', 0.0, 0.6, 0.01).name('edge cutoff');
     fCube.add(CONFIG, 'showGuide').name('show guide + gizmo').onChange(v => {
       guide.visible = v; tc.enabled = v; tc.visible = v;
