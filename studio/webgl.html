@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BYO Studio — All-WebGL Text</title>
+  <style>
+    :root {
+      --bg: #0d0f12;
+      --panel: #15181d;
+      --line: #2a2f37;
+      --ink: #e9edf2;
+      --muted: #9aa4b2;
+      --accent: #27bfe6;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+    }
+    body { display: flex; flex-direction: column; }
+
+    header {
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    header h1 { margin: 0; font-size: 16px; font-weight: 800; letter-spacing: .02em; }
+    header p  { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+      padding: 16px 20px;
+      overflow: auto;
+    }
+
+    /* the stage area: flat text canvas, with the WarpBox overlay host on top */
+    .stage {
+      position: relative;
+      min-height: 320px;
+      height: 46vh;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background:
+        radial-gradient(120% 120% at 50% 0%, #1b1f26 0%, #0d0f12 70%);
+      overflow: hidden;
+    }
+    /* the flat BYO text canvas (the "before") */
+    #textCanvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    #textCanvas.hidden { visibility: hidden; }
+
+    /* WarpBox builds its own overlay canvas inside this host */
+    #stageHost {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;          /* gizmo binds its own window listeners */
+    }
+    #stageHost.active { pointer-events: auto; }
+
+    /* controls + media row */
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 14px;
+      align-items: center;
+    }
+    .group {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 10px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .group > .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+
+    button {
+      font: inherit;
+      font-size: 13px;
+      color: var(--ink);
+      background: #1f242b;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 7px 12px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    button.primary { background: var(--accent); color: #04222b; border-color: var(--accent); font-weight: 700; }
+
+    input[type="text"] {
+      font: inherit;
+      font-size: 13px;
+      color: var(--ink);
+      background: #0f1318;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 7px 10px;
+      min-width: 220px;
+    }
+    label.radio { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; cursor: pointer; }
+
+    /* sampling media: visible so colours can be eyedropped/sample-windowed */
+    .media-row { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-start; }
+    .media-card {
+      position: relative;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #000;
+    }
+    .media-card video, .media-card img {
+      display: block;
+      width: 260px;
+      height: 160px;
+      object-fit: cover;       /* ColorSampler is object-fit:cover aware */
+    }
+    .media-card .cap {
+      position: absolute; left: 6px; bottom: 6px;
+      font-size: 10px; color: #fff; background: rgba(0,0,0,.5);
+      padding: 2px 6px; border-radius: 4px; letter-spacing: .04em;
+    }
+    #playBtn {
+      position: absolute; inset: 0; margin: auto;
+      width: 56px; height: 56px; border-radius: 50%;
+      display: none; align-items: center; justify-content: center;
+      background: rgba(0,0,0,.55); color: #fff; border: 1px solid #fff;
+      font-size: 20px;
+    }
+
+    #status { font-size: 12px; color: var(--muted); min-height: 16px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>BYO Studio — All-WebGL Text</h1>
+    <p>Text lives on one 2D canvas, warped onto the cube through the unified WebGL pipeline. Colour pulled from live media via BYO.ColorSampler.</p>
+  </header>
+
+  <main>
+    <div class="stage">
+      <canvas id="textCanvas"></canvas>
+      <div id="stageHost"></div>
+    </div>
+
+    <div class="controls">
+      <div class="group">
+        <span class="label">Text</span>
+        <input id="textInput" type="text" value="CLIMATE ACTION" />
+      </div>
+      <div class="group">
+        <span class="label">Warp</span>
+        <button id="btnWarp">Warp</button>
+      </div>
+      <div class="group">
+        <span class="label">Colour</span>
+        <button id="btnEyedrop">Eyedropper</button>
+        <button id="btnSampleWin">Sample-window fill</button>
+        <button id="btnSolid">Solid</button>
+      </div>
+      <div class="group">
+        <span class="label">Source</span>
+        <label class="radio"><input type="radio" name="src" value="video" checked /> Video</label>
+        <label class="radio"><input type="radio" name="src" value="image" /> Image</label>
+      </div>
+    </div>
+
+    <div class="media-row">
+      <div class="media-card">
+        <video id="media" muted playsinline autoplay loop crossorigin="anonymous">
+          <source src="assets/sample.webm" type="video/webm" />
+          <source src="assets/sample.mp4" type="video/mp4" />
+        </video>
+        <button id="playBtn" aria-label="Play video">&#9658;</button>
+        <span class="cap">sample video</span>
+      </div>
+      <div class="media-card">
+        <img id="mediaImg" src="assets/texture.png" alt="texture sample" crossorigin="anonymous" />
+        <span class="cap">texture.png</span>
+      </div>
+    </div>
+
+    <div id="status"></div>
+  </main>
+
+  <!-- FROZEN LOAD ORDER (studio integration contract) — do not reorder:
+       three -> color -> stage -> motion -> gizmo -> warp-surface -> color-sampler -> warpbox -> demo.
+       Dependency chain: three (everything) -> color (gizmo needs gradient textures,
+       color-sampler needs rgbToHex) -> stage (warp-surface needs maxAniso; gizmo
+       rides its scene/camera) -> motion -> gizmo -> warp-surface -> color-sampler ->
+       warpbox (composes Stage/Motion/Gizmo/WarpSurface) -> demo. three r128 from
+       unpkg, matching projection-cube/index.html. -->
+  <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+  <script src="../projection-cube/lib/color.js"></script>
+  <script src="../projection-cube/lib/stage.js"></script>
+  <script src="../projection-cube/lib/motion.js"></script>
+  <script src="../projection-cube/lib/gizmo.js"></script>
+  <script src="./lib/warp-surface.js"></script>
+  <script src="./lib/color-sampler.js"></script>
+  <script src="./lib/warpbox.js"></script>
+  <script src="./webgl-demo.js"></script>
+</body>
+</html>

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>BYO Studio — Text Component</title>
+
+  <!-- EMPTY WHITE PAGE: no chrome, no site styling. The product is the
+       text component; the floating dev panels are throwaway scaffolding
+       (toggle with H). -->
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background: #ffffff;
+      color: #111111;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+    body { padding: 8vh 0 12vh; }
+  </style>
+
+  <!-- THREE r128 global (the warp composes the projection-cube libs) -->
+  <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+
+  <!-- Google variable fonts: Inter + Roboto Flex (system fallback in stacks) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:slnt,opsz,wght@-10..0,14..32,100..900&family=Roboto+Flex:opsz,slnt,wdth,wght@8..144,-10..0,25..151,100..1000&display=swap"
+    rel="stylesheet" />
+
+  <!-- modules in dependency order (classic scripts on window.BYO) -->
+  <!-- projection-cube reused libs -->
+  <script src="../projection-cube/lib/color.js"></script>
+  <script src="../projection-cube/lib/stage.js"></script>
+  <script src="../projection-cube/lib/motion.js"></script>
+  <script src="../projection-cube/lib/gizmo.js"></script>
+  <!-- studio warp stack -->
+  <script src="lib/warp-surface.js"></script>
+  <script src="lib/color-sampler.js"></script>
+  <script src="lib/warpbox.js"></script>
+  <!-- studio dev-scaffolding + component modules -->
+  <script src="lib/panel.js"></script>
+  <script src="lib/fonts.js"></script>
+  <script src="lib/color-panel.js"></script>
+  <script src="lib/texture-window.js"></script>
+  <script src="lib/text-component.js"></script>
+  <script src="lib/dev-ui.js"></script>
+  <!-- the only page code -->
+  <script src="app.js"></script>
+</head>
+<body>
+</body>
+</html>

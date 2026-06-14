@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>BYO Studio — DOM Rich Text</title>
+  <style>
+    :root {
+      --bg: #0e0f13;
+      --panel: #16181f;
+      --ink: #f3f4f8;
+      --muted: #9aa0ad;
+      --line: #262a34;
+      --accent: #27bfe6;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; min-height: 100%;
+      background: var(--bg); color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ---- toolbar ---- */
+    .toolbar {
+      position: sticky; top: 0; z-index: 40;
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      padding: 10px 14px;
+      background: rgba(14,15,19,.92); backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--line);
+    }
+    .toolbar .brand { font-weight: 800; letter-spacing: .02em; margin-right: 8px; }
+    .toolbar .brand small { color: var(--muted); font-weight: 500; margin-left: 6px; }
+    .btn {
+      appearance: none; border: 1px solid var(--line); background: #1d2029; color: var(--ink);
+      font: inherit; font-weight: 600; font-size: 13px;
+      padding: 8px 12px; border-radius: 9px; cursor: pointer; transition: background .15s, border-color .15s;
+    }
+    .btn:hover { background: #252937; border-color: #39414f; }
+    .btn--primary { background: var(--accent); border-color: var(--accent); color: #04222b; }
+    .btn--primary:hover { background: #3fcef2; }
+    .btn--ghost { background: transparent; }
+    .spacer { flex: 1; }
+
+    /* ---- main layout: editor + persistent media panel ---- */
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 320px;
+      gap: 18px;
+      max-width: 1180px; margin: 0 auto; padding: 22px 18px 120px;
+    }
+    @media (max-width: 820px) { .layout { grid-template-columns: 1fr; } }
+
+    /* ---- editor + boxes ---- */
+    .editor { display: flex; flex-direction: column; gap: 16px; }
+    .box {
+      position: relative;
+      background: var(--panel);
+      border: 1px solid var(--line); border-radius: 14px;
+      padding: 22px 24px;
+      outline: none;
+    }
+    .box::before {
+      content: attr(data-name);
+      position: absolute; top: -10px; left: 14px;
+      font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+      color: var(--muted); background: var(--bg); padding: 0 8px; border-radius: 6px;
+    }
+    .box--selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+    .line {
+      font-weight: 800; line-height: 1.22;
+      font-size: clamp(26px, 5vw, 46px);
+      letter-spacing: -0.01em;
+      min-height: 1.22em;
+    }
+    .box .line + .line { margin-top: 2px; }
+    /* a sub-box with smaller body text to show the demo is general rich text */
+    .box--body .line { font-weight: 600; font-size: clamp(16px, 2.4vw, 22px); line-height: 1.4; }
+
+    .word { position: relative; border-radius: 4px; }
+    .word--selected { background: rgba(39,191,230,.18); box-shadow: 0 0 0 2px rgba(39,191,230,.45); }
+    /* texture-filled word: hide own glyphs, the masked video overlay shows them */
+    .word--filled { color: transparent !important; }
+
+    .hint { color: var(--muted); font-size: 12.5px; margin: 2px 4px 0; }
+
+    /* ---- persistent (non-scrolling) media panel ---- */
+    .media {
+      position: sticky; top: 64px; align-self: start;
+      display: flex; flex-direction: column; gap: 12px;
+    }
+    .media .card {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
+    }
+    .media .card h3 {
+      margin: 0; padding: 9px 12px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+      color: var(--muted); border-bottom: 1px solid var(--line);
+    }
+    .media .frame { position: relative; aspect-ratio: 16 / 10; background: #000; }
+    .media video, .media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    #playBtn {
+      display: none; position: absolute; inset: 0; margin: auto; width: 64px; height: 64px;
+      border-radius: 50%; border: none; cursor: pointer;
+      background: rgba(0,0,0,.55); color: #fff; font-size: 24px;
+    }
+    .media .note { padding: 8px 12px; color: var(--muted); font-size: 12px; }
+
+    /* ---- warp host: full-viewport overlay where the cube + gizmo live ---- */
+    .warp-host {
+      position: fixed; inset: 0; z-index: 30;
+      pointer-events: none;            /* idle: clicks pass through to the page */
+      display: none;
+    }
+    .warp-host--active { display: block; }
+    /* WarpBox's own overlay canvas has pointer-events:none; the Gizmo binds
+       window listeners, so dragging works without the host eating page input. */
+
+    /* ---- texture-fill overlay: live masked video glued over a word ---- */
+    .fill-overlay {
+      position: fixed; z-index: 25; pointer-events: none;
+      -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+      -webkit-mask-position: 0 0; mask-position: 0 0;
+      -webkit-mask-size: 100% 100%; mask-size: 100% 100%;
+    }
+    .fill-overlay--empty {
+      border: 2px dashed var(--accent); border-radius: 6px; opacity: .7;
+    }
+
+    .status {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+      padding: 9px 16px; font-size: 12.5px; color: var(--muted);
+      background: rgba(14,15,19,.94); border-top: 1px solid var(--line);
+    }
+    .status b { color: var(--ink); }
+  </style>
+</head>
+<body>
+  <!-- ===================== TOOLBAR ===================== -->
+  <div class="toolbar">
+    <span class="brand">BYO Studio <small>DOM rich text</small></span>
+    <button id="btnWarp" class="btn btn--primary">Warp this box</button>
+    <button id="btnEye" class="btn">Eyedropper</button>
+    <button id="btnTexture" class="btn">Texture fill</button>
+    <button id="btnClearWarp" class="btn btn--ghost">Clear warp</button>
+    <span class="spacer"></span>
+  </div>
+
+  <!-- ===================== LAYOUT ===================== -->
+  <div class="layout">
+    <!-- editor: 2+ stacked editable boxes; words wrapped at runtime -->
+    <div class="editor" id="editor">
+      <p class="hint">Click into a box to select it, click a word to target it. Then use the toolbar.</p>
+
+      <div class="box" contenteditable="true" spellcheck="false" data-name="Headline">
+        <div class="line">BRING YOUR OWN</div>
+        <div class="line">CLIMATE ACTION</div>
+        <div class="line">TO SCIENCE WEEK</div>
+      </div>
+
+      <div class="box box--body" contenteditable="true" spellcheck="false" data-name="Body copy">
+        <div class="line">Every word is real selectable text wrapped per word.</div>
+        <div class="line">Colour any word with the eyedropper or fill it with video.</div>
+      </div>
+    </div>
+
+    <!-- persistent media panel: the sampling sources (do NOT scroll away) -->
+    <aside class="media">
+      <div class="card">
+        <h3>Video source</h3>
+        <div class="frame">
+          <video id="srcVideo" muted playsinline autoplay loop crossorigin="anonymous">
+            <source src="assets/sample.mp4" type="video/mp4" />
+            <source src="assets/sample.webm" type="video/webm" />
+          </video>
+          <button id="playBtn" title="Play">&#9654;</button>
+        </div>
+        <div class="note">Eyedropper &amp; Texture fill sample from this live video.</div>
+      </div>
+      <div class="card">
+        <h3>Image texture</h3>
+        <div class="frame">
+          <img id="srcImg" src="assets/texture.png" alt="texture sample" crossorigin="anonymous" />
+        </div>
+        <div class="note">Eyedropper also samples this image (object-fit: cover aware).</div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- full-viewport overlay host where the WarpBox cube + gizmo render -->
+  <div class="warp-host" id="warpHost"></div>
+
+  <div class="status" id="status">Loading…</div>
+
+  <!-- FROZEN LOAD ORDER (studio integration contract) — do not reorder:
+       three -> color -> stage -> motion -> gizmo -> warp-surface -> color-sampler -> warpbox -> demo.
+       Dependency chain: three (everything) -> color (gizmo needs gradient textures,
+       color-sampler needs rgbToHex) -> stage (warp-surface needs maxAniso; gizmo
+       rides its scene/camera) -> motion -> gizmo -> warp-surface -> color-sampler ->
+       warpbox (composes Stage/Motion/Gizmo/WarpSurface) -> demo. three r128 from
+       unpkg, matching projection-cube/index.html. -->
+  <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+  <script src="../projection-cube/lib/color.js"></script>
+  <script src="../projection-cube/lib/stage.js"></script>
+  <script src="../projection-cube/lib/motion.js"></script>
+  <script src="../projection-cube/lib/gizmo.js"></script>
+  <script src="./lib/warp-surface.js"></script>
+  <script src="./lib/color-sampler.js"></script>
+  <script src="./lib/warpbox.js"></script>
+  <script src="./dom-demo.js"></script>
+</body>
+</html>
