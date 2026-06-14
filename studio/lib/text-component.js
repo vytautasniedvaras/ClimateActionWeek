@@ -79,28 +79,38 @@
   color: inherit;
   outline: 1px dashed rgba(0,0,0,0.4);
 }
-.byo-textcomp__handle {
-  position: absolute;
-  top: 0;
-  width: 10px;
-  height: 100%;
-  cursor: ew-resize;
-  z-index: 5;
-  background: transparent;
+/* selection chrome — only shown while the component is active (utilitarian) */
+.byo-textcomp__chrome { position: absolute; inset: 0; pointer-events: none; display: none; z-index: 6; }
+.byo-textcomp--active .byo-textcomp__chrome { display: block; }
+.byo-textcomp--active { outline: 1px solid rgba(64,120,255,0.7); outline-offset: 0; }
+.byo-textcomp--preview.byo-textcomp--active { outline: none; }
+.byo-textcomp__bound {
+  position: absolute; inset: 0;
+  box-shadow: 0 0 0 1px rgba(64,120,255,0.35) inset;
 }
-.byo-textcomp__handle::before {
-  content: "";
-  position: absolute;
-  top: 50%; transform: translateY(-50%);
-  left: 3px;
-  width: 4px; height: 36px;
-  border-radius: 2px;
-  background: rgba(0,0,0,0.18);
+/* margin shading: translucent bands from each box edge out to the page edge */
+.byo-textcomp__margin { position: absolute; background: rgba(64,120,255,0.07); pointer-events: none; }
+/* 8 resize/move handles + a top move grip */
+.byo-textcomp__h {
+  position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px;
+  background: #fff; border: 1.5px solid rgba(64,120,255,0.9); border-radius: 2px;
+  pointer-events: auto; box-sizing: border-box; z-index: 7;
 }
-.byo-textcomp__handle:hover::before { background: rgba(0,0,0,0.4); }
-.byo-textcomp__handle--left { left: 0; }
-.byo-textcomp__handle--right { right: 0; }
-.byo-textcomp__handle--right::before { left: auto; right: 3px; }
+.byo-textcomp__h--tl { left: 0;   top: 0;   cursor: move; }
+.byo-textcomp__h--tr { left: 100%;top: 0;   cursor: move; }
+.byo-textcomp__h--bl { left: 0;   top: 100%;cursor: move; }
+.byo-textcomp__h--br { left: 100%;top: 100%;cursor: move; }
+.byo-textcomp__h--l  { left: 0;   top: 50%; cursor: ew-resize; }
+.byo-textcomp__h--r  { left: 100%;top: 50%; cursor: ew-resize; }
+.byo-textcomp__h--t  { left: 50%; top: 0;   cursor: ns-resize; }
+.byo-textcomp__h--b  { left: 50%; top: 100%;cursor: ns-resize; }
+.byo-textcomp__readout {
+  position: absolute; left: 0; top: -20px; height: 16px; line-height: 16px;
+  padding: 0 5px; font: 10px/16px system-ui, sans-serif; color: #fff;
+  background: rgba(64,120,255,0.95); border-radius: 3px; white-space: nowrap;
+  pointer-events: none; display: none;
+}
+.byo-textcomp__chrome--dragging .byo-textcomp__readout { display: block; }
 .byo-textcomp.byo-textcomp--warped .byo-word { visibility: hidden; }
 .byo-textcomp__warphost {
   position: fixed;
@@ -181,10 +191,14 @@
       this.id = ++_seq;
       this.mount = opts.mount || document.body;
 
-      // layout state
-      this.leftPct = 0;
-      this.rightPct = 0;
-      this.topPx = opts.top != null ? opts.top : null;  // null = normal flow
+      // layout state — free 2D corner-anchor placement (% of mount). anchor is
+      // the corner the user last grabbed (kept for serialize / resize intent);
+      // xPct/yPct is the box's top-left, widthPct its width. Height is auto.
+      this.pos = { anchor: 'tl', xPct: 0, yPct: 0, widthPct: 100 };
+      this.dock = null;                 // { relTo, side:'right|left|above|below', gapPct } or null
+      this.z = 0;                       // stacking order (CSS z-index + warp host)
+      this.active = false;              // selected -> shows boundary + handles + panels
+      this.preview = false;             // preview mode hides editing chrome
 
       // semantic + format state
       this.tag = 'untagged';
@@ -244,20 +258,40 @@
       line.appendChild(document.createTextNode('Edit me'));
       ed.appendChild(line);
 
-      const hL = document.createElement('div');
-      hL.className = 'byo-textcomp__handle byo-textcomp__handle--left';
-      const hR = document.createElement('div');
-      hR.className = 'byo-textcomp__handle byo-textcomp__handle--right';
+      // selection chrome (hidden until active): boundary + margin shading +
+      // 8 handles (4 corners move, l/r resize width, t/b nudge vertically) +
+      // a drag readout. pointer-events only on the handles.
+      const chrome = document.createElement('div');
+      chrome.className = 'byo-textcomp__chrome';
+      const bound = document.createElement('div');
+      bound.className = 'byo-textcomp__bound';
+      chrome.appendChild(bound);
+      this._marginEls = {};
+      ['l', 'r', 't', 'b'].forEach((m) => {
+        const me = document.createElement('div');
+        me.className = 'byo-textcomp__margin byo-textcomp__margin--' + m;
+        chrome.appendChild(me);
+        this._marginEls[m] = me;
+      });
+      this._handles = {};
+      ['tl', 'tr', 'bl', 'br', 'l', 'r', 't', 'b'].forEach((k) => {
+        const h = document.createElement('div');
+        h.className = 'byo-textcomp__h byo-textcomp__h--' + k;
+        chrome.appendChild(h);
+        this._handles[k] = h;
+      });
+      const readout = document.createElement('div');
+      readout.className = 'byo-textcomp__readout';
+      chrome.appendChild(readout);
+      this._readout = readout;
+      this._chrome = chrome;
 
-      root.appendChild(hL);
-      root.appendChild(hR);
+      root.appendChild(chrome);
       root.appendChild(ed);
       this.mount.appendChild(root);
 
       this.el = root;
       this.editable = ed;
-      this.handleLeft = hL;
-      this.handleRight = hR;
     }
 
     /* ---------------- events ---------------- */
@@ -287,13 +321,13 @@
         if (this._selection.length) this._selectionSnapshot = this._selection.slice();
       });
 
-      // mark this component active for the dev UI's getActive()
-      ed.addEventListener('focus', () => { TextComponent._active = this; });
-      this.el.addEventListener('mousedown', () => { TextComponent._active = this; });
+      // mark this component active (selected) for the dev UI's getActive() and
+      // to show the selection chrome. focus + any mousedown inside activates.
+      ed.addEventListener('focus', () => this.activate());
+      this.el.addEventListener('mousedown', () => this.activate());
 
-      // drag handles -> live leftPct / rightPct
-      this._bindHandle(this.handleLeft, 'left');
-      this._bindHandle(this.handleRight, 'right');
+      // chrome drag handles -> live position / size
+      Object.keys(this._handles).forEach((k) => this._bindHandle(this._handles[k], k));
 
       // resize: reposition warp overlay + re-rasterize (fixes shader-resize bug)
       this._onResize = () => {
@@ -303,80 +337,162 @@
           this._rasterizeIntoWarp();
         }
         this._repositionFills();
+        this._updateMarginViz();
+        if (TextComponent._onGeometryChange) TextComponent._onGeometryChange(this);
       };
       window.addEventListener('resize', this._onResize);
     }
 
-    _bindHandle(handle, side) {
+    // Drag a chrome handle. Corners (tl/tr/bl/br) MOVE the whole box (height is
+    // auto, so diagonal resize is meaningless); l/r resize width; t/b nudge the
+    // box vertically. All maths in % of the viewport (the component's containing
+    // block, since it is a direct child of <body>). A manual drag clears docking.
+    _bindHandle(handle, kind) {
       handle.addEventListener('mousedown', (e) => {
         e.preventDefault();
-        TextComponent._active = this;
-        const mountRect = this.mount.getBoundingClientRect();
-        const mountW = Math.max(1, mountRect.width);
+        e.stopPropagation();
+        this.activate();
+        this.dock = null;
+        if (kind.length === 2) this.pos.anchor = kind;   // grabbed corner is the anchor
+        const vW = Math.max(1, window.innerWidth), vH = Math.max(1, window.innerHeight);
+        const s0 = { x: e.clientX, y: e.clientY, xPct: this.pos.xPct, yPct: this.pos.yPct, wPct: this.pos.widthPct };
+        this._chrome.classList.add('byo-textcomp__chrome--dragging');
         const onMove = (ev) => {
-          const x = ev.clientX - mountRect.left;
-          if (side === 'left') {
-            let pct = (x / mountW) * 100;
-            pct = Math.max(0, Math.min(pct, 100 - this.rightPct - 5));
-            this.leftPct = pct;
-          } else {
-            let pct = ((mountW - x) / mountW) * 100;
-            pct = Math.max(0, Math.min(pct, 100 - this.leftPct - 5));
-            this.rightPct = pct;
+          const dxPct = ((ev.clientX - s0.x) / vW) * 100;
+          const dyPct = ((ev.clientY - s0.y) / vH) * 100;
+          if (kind.length === 2) {                       // corner -> move
+            this.pos.xPct = s0.xPct + dxPct;
+            this.pos.yPct = s0.yPct + dyPct;
+          } else if (kind === 'l') {                     // left edge -> resize from left
+            this.pos.xPct = s0.xPct + dxPct;
+            this.pos.widthPct = s0.wPct - dxPct;
+          } else if (kind === 'r') {                     // right edge -> resize width
+            this.pos.widthPct = s0.wPct + dxPct;
+          } else {                                       // t / b -> vertical move
+            this.pos.yPct = s0.yPct + dyPct;
           }
+          this._clampPos();
           this._applyLayout();
-          if (this._onLayoutChange) this._onLayoutChange(this.leftPct, this.rightPct);
-          if (this.isWarped) {
-            this._positionWarpHost();
-            if (this.warp && this.warp.resize) this.warp.resize();
-            this._rasterizeIntoWarp();
-          }
-          this._repositionFills();
+          this._updateReadout();
+          this._afterGeometryChange();
         };
         const onUp = () => {
           window.removeEventListener('mousemove', onMove);
           window.removeEventListener('mouseup', onUp);
+          this._chrome.classList.remove('byo-textcomp__chrome--dragging');
+          if (this._onLayoutChange) this._onLayoutChange();
         };
         window.addEventListener('mousemove', onMove);
         window.addEventListener('mouseup', onUp);
       });
     }
 
-    // app/dev-ui hook to reflect handle drags into number inputs
-    onLayoutChange(cb) { this._onLayoutChange = cb; }
-
-    /* ---------------- layout ---------------- */
-    _applyLayout() {
-      const s = this.el.style;
-      s.marginLeft = this.leftPct + '%';
-      s.marginRight = this.rightPct + '%';
-      s.width = 'auto';      // margins inset both edges; height stays auto (content)
-      if (this.topPx != null) {
-        s.position = 'absolute';
-        s.left = this.leftPct + '%';
-        s.right = this.rightPct + '%';
-        s.top = this.topPx + 'px';
-        s.marginLeft = s.marginRight = '0';
-        s.width = 'auto';
-      }
+    _clampPos() {
+      const p = this.pos;
+      p.widthPct = Math.max(5, Math.min(200, p.widthPct));
+      p.xPct = Math.max(-20, Math.min(120, p.xPct));
+      p.yPct = Math.max(-10, Math.min(400, p.yPct));
     }
 
-    setLayout(leftPct, rightPct) {
-      if (leftPct != null) this.leftPct = Math.max(0, Math.min(95, leftPct));
-      if (rightPct != null) this.rightPct = Math.max(0, Math.min(95, rightPct));
-      // prevent the two insets from summing past the width (negative/collapsed
-      // component). The handle-drag path already clamps; this guards the
-      // number-input path. Trim whichever value was just set.
-      if (this.leftPct + this.rightPct > 95) {
-        if (rightPct != null) this.rightPct = Math.max(0, 95 - this.leftPct);
-        else this.leftPct = Math.max(0, 95 - this.rightPct);
-      }
-      this._applyLayout();
+    // app/dev-ui hook: notified (no args) after a handle drag so panels re-read pos
+    onLayoutChange(cb) { this._onLayoutChange = cb; }
+
+    _afterGeometryChange() {
       if (this.isWarped) {
         this._positionWarpHost();
         if (this.warp && this.warp.resize) this.warp.resize();
         this._rasterizeIntoWarp();
       }
+      this._repositionFills();
+      if (TextComponent._onGeometryChange) TextComponent._onGeometryChange(this);
+    }
+
+    /* ---------------- layout (free 2D corner-anchor, % of viewport) ---------------- */
+    _applyLayout() {
+      const s = this.el.style;
+      s.position = 'absolute';
+      s.margin = '0';
+      s.left = this.pos.xPct + '%';
+      s.top = this.pos.yPct + '%';
+      s.width = this.pos.widthPct + '%';
+      s.zIndex = String(this.z || 0);
+      this._updateMarginViz();
+    }
+
+    // position the 4 translucent margin bands from each box edge to the page edge
+    _updateMarginViz() {
+      if (!this.active || !this._marginEls) return;
+      const m = this.mount.getBoundingClientRect();
+      const r = this.el.getBoundingClientRect();
+      const E = this._marginEls;
+      const lw = Math.max(0, r.left - m.left), rw = Math.max(0, m.right - r.right);
+      const th = Math.max(0, r.top - m.top), bh = Math.max(0, m.bottom - r.bottom);
+      E.l.style.cssText = 'position:absolute;background:rgba(64,120,255,0.07);top:0;bottom:0;left:' + (-lw) + 'px;width:' + lw + 'px;';
+      E.r.style.cssText = 'position:absolute;background:rgba(64,120,255,0.07);top:0;bottom:0;left:100%;width:' + rw + 'px;';
+      E.t.style.cssText = 'position:absolute;background:rgba(64,120,255,0.07);left:0;right:0;top:' + (-th) + 'px;height:' + th + 'px;';
+      E.b.style.cssText = 'position:absolute;background:rgba(64,120,255,0.07);left:0;right:0;top:100%;height:' + bh + 'px;';
+    }
+
+    _updateReadout() {
+      if (!this._readout) return;
+      const p = this.pos;
+      this._readout.textContent = Math.round(p.xPct) + ', ' + Math.round(p.yPct) + ' · w' + Math.round(p.widthPct) + '%';
+    }
+
+    /* public positioning API (dev-ui Layout panel + app docking) */
+    setPos(p) {
+      p = p || {};
+      if (p.anchor) this.pos.anchor = p.anchor;
+      if (p.xPct != null) this.pos.xPct = p.xPct;
+      if (p.yPct != null) this.pos.yPct = p.yPct;
+      if (p.widthPct != null) this.pos.widthPct = p.widthPct;
+      this._clampPos();
+      this._applyLayout();
+      this._afterGeometryChange();
+    }
+    setZ(z) { this.z = z | 0; this.el.style.zIndex = String(this.z); if (this._warpHost) this._warpHost.style.zIndex = String(40 + this.z); }
+    setDock(dock) { this.dock = dock || null; if (TextComponent._onGeometryChange) TextComponent._onGeometryChange(this); }
+
+    // resolve a dock against a reference component's screen rect (called by app)
+    applyDockFrom(refRect) {
+      if (!this.dock || !refRect) return;
+      const vW = Math.max(1, window.innerWidth), vH = Math.max(1, window.innerHeight);
+      const gap = (this.dock.gapPct || 0);
+      const refXPct = (refRect.left / vW) * 100, refYPct = (refRect.top / vH) * 100;
+      const refWPct = (refRect.width / vW) * 100, refHPct = (refRect.height / vH) * 100;
+      const side = this.dock.side;
+      if (side === 'right') { this.pos.xPct = refXPct + refWPct + gap; this.pos.yPct = refYPct; }
+      else if (side === 'left') { this.pos.xPct = refXPct - this.pos.widthPct - gap; this.pos.yPct = refYPct; }
+      else if (side === 'below') { this.pos.xPct = refXPct; this.pos.yPct = refYPct + refHPct + gap; }
+      else if (side === 'above') { this.pos.xPct = refXPct; this.pos.yPct = refYPct - refHPct - gap; }
+      this._clampPos();
+      this._applyLayout();
+      if (this.isWarped) { this._positionWarpHost(); if (this.warp && this.warp.resize) this.warp.resize(); this._rasterizeIntoWarp(); }
+      this._repositionFills();
+    }
+
+    /* ---------------- active / preview state ---------------- */
+    activate() {
+      if (TextComponent._active && TextComponent._active !== this) TextComponent._active.deactivate(true);
+      TextComponent._active = this;
+      if (!this.active) {
+        this.active = true;
+        this.el.classList.add('byo-textcomp--active');
+        this._updateMarginViz();
+      }
+      if (TextComponent._onActiveChange) TextComponent._onActiveChange(this);
+    }
+    deactivate(skipNotify) {
+      if (!this.active) return;
+      this.active = false;
+      this.el.classList.remove('byo-textcomp--active');
+      if (TextComponent._active === this) TextComponent._active = null;
+      if (!skipNotify && TextComponent._onActiveChange) TextComponent._onActiveChange(null);
+    }
+    setPreview(on) {
+      this.preview = !!on;
+      this.el.classList.toggle('byo-textcomp--preview', this.preview);
+      if (this.preview) this.deactivate(true);
     }
 
     /* ---------------- per-word wrapping (caret + data-color preserving) ---------------- */
@@ -748,7 +864,9 @@
         left: Math.round(r.left) + 'px',
         top: Math.round(r.top) + 'px',
         width: Math.max(1, Math.round(r.width)) + 'px',
-        height: Math.max(1, Math.round(r.height)) + 'px'
+        height: Math.max(1, Math.round(r.height)) + 'px',
+        // mirror the component's z so warped boxes layer in the same order
+        zIndex: String(40 + (this.z || 0))
       });
     }
 
@@ -836,8 +954,9 @@
       });
 
       const out = {
-        leftPct: this.leftPct,
-        rightPct: this.rightPct,
+        pos: { anchor: this.pos.anchor, xPct: this.pos.xPct, yPct: this.pos.yPct, widthPct: this.pos.widthPct },
+        dock: this.dock ? { relTo: this.dock.relTo, side: this.dock.side, gapPct: this.dock.gapPct } : null,
+        z: this.z,
         tag: this.tag,
         lines: lines,
         format: Object.assign({}, this.format),
@@ -867,8 +986,21 @@
 
     deserialize(state) {
       state = state || {};
-      this.leftPct = state.leftPct != null ? state.leftPct : 0;
-      this.rightPct = state.rightPct != null ? state.rightPct : 0;
+      // positioning: prefer the 2D corner-anchor model; migrate legacy
+      // leftPct/rightPct (full-width inset) into it for old documents.
+      if (state.pos) {
+        this.pos = {
+          anchor: state.pos.anchor || 'tl',
+          xPct: state.pos.xPct != null ? state.pos.xPct : 0,
+          yPct: state.pos.yPct != null ? state.pos.yPct : 0,
+          widthPct: state.pos.widthPct != null ? state.pos.widthPct : 100
+        };
+      } else {
+        const l = state.leftPct || 0, r = state.rightPct || 0;
+        this.pos = { anchor: 'tl', xPct: l, yPct: 0, widthPct: Math.max(5, 100 - l - r) };
+      }
+      this.dock = state.dock || null;
+      this.z = state.z || 0;
       this.tag = state.tag || 'untagged';
       this.editable.dataset.tag = this.tag;
 
@@ -949,10 +1081,18 @@
   }
 
   TextComponent._active = null;
+  TextComponent._onActiveChange = null;   // dev-ui subscribes (show/hide panels)
+  TextComponent._onGeometryChange = null; // app subscribes (recompute docked boxes)
 
   BYO.TextComponent = {
     create(opts) { return new TextComponent(opts || {}); },
-    // dev-ui getActive() convenience: last-interacted component
-    getActive() { return TextComponent._active; }
+    // dev-ui getActive() convenience: last-interacted (active/selected) component
+    getActive() { return TextComponent._active; },
+    // dev-ui: fired with the active component (or null on deselect)
+    onActiveChange(cb) { TextComponent._onActiveChange = cb; },
+    // app: fired with a component whose geometry changed (for relative docking)
+    onGeometryChange(cb) { TextComponent._onGeometryChange = cb; },
+    // global deselect (app binds it to clicks on empty page)
+    deselect() { if (TextComponent._active) TextComponent._active.deactivate(); }
   };
 })();

@@ -51,7 +51,7 @@
     const a = BYO.TextComponent.create({
       mount: document.body,
       state: {
-        leftPct: 6, rightPct: 6, tag: 'header',
+        pos: { anchor: 'tl', xPct: 6, yPct: 10, widthPct: 60 }, z: 0, tag: 'header',
         lines: [{ words: [
           { text: 'Bring', color: '' },
           { text: 'your', color: '' },
@@ -64,7 +64,7 @@
     const b = BYO.TextComponent.create({
       mount: document.body,
       state: {
-        leftPct: 6, rightPct: 30, tag: 'paragraph',
+        pos: { anchor: 'tl', xPct: 6, yPct: 42, widthPct: 50 }, z: 0, tag: 'paragraph',
         lines: [{ words: [
           { text: 'Drop', color: '' },
           { text: 'this', color: '' },
@@ -78,19 +78,39 @@
       }
     });
 
-    // give the second block some breathing room below the first
-    b.el.style.marginTop = '28px';
+    // component registry (single source of truth for the app: docking targets,
+    // export, breakpoint switching). state.components is read by the dev UI.
+    const components = [a, b];
+    state.components = components;
 
     state.activeComponent = a;
-    BYO.TextComponent._active = a;
+    a.activate();
 
-    // getActive: last-interacted component (TextComponent tracks it on focus /
-    // mousedown). Mirror it into app state so export covers the active id.
+    // getActive: last-interacted (active/selected) component. Mirror into state.
     function getActive() {
-      const active = BYO.TextComponent.getActive() || a;
-      state.activeComponent = active;
-      return active;
+      const active = BYO.TextComponent.getActive();
+      if (active) state.activeComponent = active;
+      return state.activeComponent;
     }
+
+    /* ---- relative docking: when any box's geometry changes, re-resolve every
+       box docked to it against the reference's live screen rect. ---- */
+    function recomputeLayout() {
+      components.forEach(function (c) {
+        if (!c.dock) return;
+        const ref = components.filter(function (x) { return x.id === c.dock.relTo; })[0];
+        if (ref) c.applyDockFrom(ref.el.getBoundingClientRect());
+      });
+    }
+    BYO.TextComponent.onGeometryChange(recomputeLayout);
+    recomputeLayout();
+
+    /* ---- click on empty page (not a component, not a panel) -> deselect ---- */
+    document.addEventListener('mousedown', function (e) {
+      const t = e.target;
+      if (t.closest && (t.closest('.byo-textcomp') || t.closest('.byo-panel'))) return;
+      BYO.TextComponent.deselect();
+    });
 
     /* ---- attach the throwaway dev UI -----------------------------------
        The sampling sources live INSIDE the Texture panel (not page furniture). */
@@ -100,21 +120,26 @@
       sources: { video: video, img: img }
     });
 
-    /* ---- H toggles all dev panels (the dev UI is throwaway scaffolding) ---- */
+    /* ---- H toggles all dev panels; P toggles preview (hide editing chrome,
+       keep the warp cubes + gizmos live) ---- */
+    function setPreview(on) {
+      state.preview = !!on;
+      components.forEach(function (c) { c.setPreview(state.preview); });
+      if (state.preview) BYO.Panel.hideAll(); else BYO.Panel.showAll();
+    }
     window.addEventListener('keydown', function (e) {
-      // ignore while typing into the component / an input
       const t = e.target;
       const typing = t && (t.isContentEditable ||
         t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT');
       if (typing) return;
-      if (e.key === 'h' || e.key === 'H') {
-        e.preventDefault();
-        BYO.Panel.toggleAll();
-      }
+      if (e.key === 'h' || e.key === 'H') { e.preventDefault(); BYO.Panel.toggleAll(); }
+      else if (e.key === 'p' || e.key === 'P') { e.preventDefault(); setPreview(!state.preview); }
     });
 
-    // expose for debugging / future export-import
-    window.__BYO_APP__ = { state: state, components: [a, b], getActive: getActive };
+    // expose for debugging / export-import
+    state.setPreview = setPreview;
+    state.recomputeLayout = recomputeLayout;
+    window.__BYO_APP__ = { state: state, components: components, getActive: getActive, setPreview: setPreview };
   }
 
   if (document.readyState === 'loading') {

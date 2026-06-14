@@ -94,6 +94,10 @@
     const srcObj = cfg.sources || {};
     const colorSources = [srcObj.video, srcObj.img].filter(Boolean);
 
+    // forward-declared so the active-component retarget can reference them
+    // before the Effects panel is built (see the effects section below).
+    let effectsPanel = null, refreshEffects = null;
+
     /* =============================================================
        COLOUR panel
        ============================================================= */
@@ -279,32 +283,68 @@
     rebuildAxisSliders();
 
     /* =============================================================
-       LAYOUT panel — leftPct / rightPct (reflects live handle drags)
+       LAYOUT panel — free 2D placement (X/Y/Width %), z-order + docking
+       (reflects live handle drags; X/Y/W are % of the viewport)
        ============================================================= */
     const layoutPanel = BYO.Panel.create({ title: 'Layout', id: 'devui-layout', width: 220 });
     layoutPanel.setPosition(16, 320);
 
-    const leftRow = row('Left %');
-    const leftInput = numInput(0, 1);
-    leftInput.min = '0'; leftInput.max = '95';
-    leftRow.appendChild(leftInput);
-    layoutPanel.body.appendChild(leftRow);
-
-    const rightRow = row('Right %');
-    const rightInput = numInput(0, 1);
-    rightInput.min = '0'; rightInput.max = '95';
-    rightRow.appendChild(rightInput);
-    layoutPanel.body.appendChild(rightRow);
+    const xRow = row('X %'); const xInput = numInput(0, 0.5); xRow.appendChild(xInput); layoutPanel.body.appendChild(xRow);
+    const yRow = row('Y %'); const yInput = numInput(0, 0.5); yRow.appendChild(yInput); layoutPanel.body.appendChild(yRow);
+    const wRow = row('Width %'); const wInput = numInput(100, 0.5); wInput.min = '5'; wInput.max = '200'; wRow.appendChild(wInput); layoutPanel.body.appendChild(wRow);
+    const zRow = row('Z order'); const zInput = numInput(0, 1); zRow.appendChild(zInput); layoutPanel.body.appendChild(zRow);
 
     function applyLayoutNow() {
       const a = getActive();
       if (!a) return;
-      const l = leftInput.value === '' ? 0 : Number(leftInput.value);
-      const rr = rightInput.value === '' ? 0 : Number(rightInput.value);
-      a.setLayout(l, rr);
+      a.setPos({
+        xPct: xInput.value === '' ? 0 : Number(xInput.value),
+        yPct: yInput.value === '' ? 0 : Number(yInput.value),
+        widthPct: wInput.value === '' ? 100 : Number(wInput.value)
+      });
     }
-    leftInput.addEventListener('input', applyLayoutNow);
-    rightInput.addEventListener('input', applyLayoutNow);
+    xInput.addEventListener('input', applyLayoutNow);
+    yInput.addEventListener('input', applyLayoutNow);
+    wInput.addEventListener('input', applyLayoutNow);
+    zInput.addEventListener('input', function () { const a = getActive(); if (a) a.setZ(Number(zInput.value) || 0); });
+
+    // relative docking: dock the active box beside / above / below another
+    const dockRow = row('Dock');
+    const dockSide = selectInput([
+      { value: '', label: 'none' }, { value: 'right', label: 'right of' }, { value: 'left', label: 'left of' },
+      { value: 'below', label: 'below' }, { value: 'above', label: 'above' }
+    ]);
+    dockRow.appendChild(dockSide);
+    layoutPanel.body.appendChild(dockRow);
+    const dockToRow = row('Dock to');
+    const dockTo = selectInput([{ value: '', label: '(pick)' }]);
+    dockToRow.appendChild(dockTo);
+    layoutPanel.body.appendChild(dockToRow);
+    const gapRow = row('Gap %'); const gapInput = numInput(2, 0.5); gapRow.appendChild(gapInput); layoutPanel.body.appendChild(gapRow);
+
+    // populate the dock-target list from the app's component registry
+    function refreshDockTargets() {
+      const a = getActive();
+      const comps = (state.components || []);
+      const cur = dockTo.value;
+      dockTo.innerHTML = '';
+      const none = document.createElement('option'); none.value = ''; none.textContent = '(pick)'; dockTo.appendChild(none);
+      comps.forEach(function (c) {
+        if (c === a) return;
+        const op = document.createElement('option'); op.value = String(c.id); op.textContent = 'box #' + c.id; dockTo.appendChild(op);
+      });
+      dockTo.value = cur;
+    }
+    function applyDockNow() {
+      const a = getActive();
+      if (!a) return;
+      const side = dockSide.value;
+      if (!side || !dockTo.value) { a.setDock(null); return; }
+      a.setDock({ relTo: Number(dockTo.value), side: side, gapPct: Number(gapInput.value) || 0 });
+    }
+    dockSide.addEventListener('change', applyDockNow);
+    dockTo.addEventListener('change', applyDockNow);
+    gapInput.addEventListener('input', applyDockNow);
 
     /* =============================================================
        WARP panel — toggle + projection / edge / spin sliders
@@ -438,36 +478,40 @@
     });
 
     /* =============================================================
-       Retarget on active-component change: keep the panels reflecting
-       whichever component the user last touched. Poll lightly (the
-       active component is set on focus / mousedown inside the component).
+       Active-component driven (NO polling): the editing panels reflect and
+       show/hide with the active (selected) component. TextComponent fires
+       onActiveChange(component|null); deselect hides the editing panels.
        ============================================================= */
-    let lastActive = null;
-    function retargetIfChanged() {
-      const a = getActive();
-      if (a === lastActive) return;
-      lastActive = a;
-      if (!a) return;
-      // reflect this component's layout + warp state into the panels
-      leftInput.value = String(Math.round((a.leftPct || 0) * 10) / 10);
-      rightInput.value = String(Math.round((a.rightPct || 0) * 10) / 10);
-      tagSel.value = a.tag || 'untagged';
-      syncWarpControlsFromActive();
-      // re-open the colour picker so its seed colour + hex/RGB inputs + marker
-      // reflect the NEWLY-active component's selection (was only called once at
-      // init, leaving the panel showing the previous component's colour).
-      openColorPicker();
+    const editingPanels = [colorPanel, formatPanel, layoutPanel, warpPanel, texturePanel, effectsPanel];
+    function showEditing(on) { editingPanels.forEach(function (p) { if (p) (on ? p.show() : p.hide()); }); }
 
-      // reflect handle-drag layout changes live into the number inputs
-      if (typeof a.onLayoutChange === 'function') {
-        a.onLayoutChange(function (l, r) {
-          leftInput.value = String(Math.round(l * 10) / 10);
-          rightInput.value = String(Math.round(r * 10) / 10);
-        });
-      }
+    function retarget(a) {
+      if (!a) { showEditing(false); return; }
+      showEditing(true);
+      xInput.value = String(Math.round((a.pos.xPct || 0) * 10) / 10);
+      yInput.value = String(Math.round((a.pos.yPct || 0) * 10) / 10);
+      wInput.value = String(Math.round((a.pos.widthPct != null ? a.pos.widthPct : 100) * 10) / 10);
+      zInput.value = String(a.z || 0);
+      tagSel.value = a.tag || 'untagged';
+      dockSide.value = a.dock ? a.dock.side : '';
+      gapInput.value = String(a.dock ? (a.dock.gapPct || 0) : 2);
+      refreshDockTargets();
+      if (a.dock) dockTo.value = String(a.dock.relTo);
+      syncWarpControlsFromActive();
+      refreshInlineButtons();
+      if (refreshEffects) refreshEffects();
+      // re-open the colour picker so its seed + hex/RGB + marker reflect the
+      // newly-active component's selection.
+      openColorPicker();
+      // reflect live handle drags into the X/Y/Width inputs
+      a.onLayoutChange(function () {
+        xInput.value = String(Math.round(a.pos.xPct * 10) / 10);
+        yInput.value = String(Math.round(a.pos.yPct * 10) / 10);
+        wInput.value = String(Math.round(a.pos.widthPct * 10) / 10);
+      });
     }
-    const poll = setInterval(retargetIfChanged, 150);
-    retargetIfChanged();
+    BYO.TextComponent.onActiveChange(retarget);
+    retarget(getActive());
 
     return {
       colorPanel: colorPanel,
@@ -475,10 +519,11 @@
       layoutPanel: layoutPanel,
       warpPanel: warpPanel,
       texturePanel: texturePanel,
+      effectsPanel: effectsPanel,
       pushRecent: pushRecent,
+      retarget: retarget,
       destroy: function () {
-        clearInterval(poll);
-        [colorPanel, formatPanel, layoutPanel, warpPanel, texturePanel].forEach(function (p) { p.destroy(); });
+        editingPanels.forEach(function (p) { if (p) p.destroy(); });
         if (textureWindow) textureWindow.dispose();
       }
     };
