@@ -71,6 +71,14 @@
   }
   function clampByte(v) { v = Math.round(v); return v < 0 ? 0 : v > 255 ? 255 : v; }
 
+  // keep focus on whatever the picker is editing (the contenteditable text
+  // selection): mousedown on a picker control must not blur it. Range/native
+  // inputs that need focus (hex / r/g/b) are excluded by the caller.
+  function _keepFocus(el) {
+    el.addEventListener('mousedown', function (e) { e.preventDefault(); });
+    return el;
+  }
+
   function create(panelBody) {
     if (!panelBody) throw new Error('ColorPanel.create needs a panel body element');
 
@@ -141,7 +149,7 @@
     root.appendChild(inputs);
 
     // eyedropper button
-    const eyeBtn = document.createElement('button');
+    const eyeBtn = _keepFocus(document.createElement('button'));
     eyeBtn.type = 'button';
     eyeBtn.textContent = 'Eyedropper';
     eyeBtn.style.cssText = 'width:100%;margin-bottom:8px;padding:4px;font:inherit;cursor:pointer;';
@@ -336,7 +344,7 @@
       list.forEach((hx) => {
         const canon = parseHex(hx);
         if (!canon) return;
-        const sw = document.createElement('button');
+        const sw = _keepFocus(document.createElement('button'));
         sw.type = 'button';
         sw.title = canon;
         sw.style.cssText = 'width:18px;height:18px;padding:0;border:1px solid rgba(0,0,0,.25);' +

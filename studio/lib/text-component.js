@@ -55,6 +55,12 @@
 }
 .byo-textcomp__line { display: block; min-height: 1em; }
 .byo-word { color: inherit; }
+/* inline formatting as per-word attributes (warp-safe: getComputedStyle(word)
+   reflects these, so the rasterizer picks them up). */
+.byo-word[data-bold="1"] { font-weight: 700; }
+.byo-word[data-italic="1"] { font-style: italic; }
+.byo-word[data-href] { text-decoration: underline; }
+.byo-textcomp--preview .byo-word[data-href] { cursor: pointer; }
 .byo-word--selected {
   /* selection marker — utilitarian, not a site visual */
   background: rgba(64, 120, 255, 0.22);
@@ -73,28 +79,38 @@
   color: inherit;
   outline: 1px dashed rgba(0,0,0,0.4);
 }
-.byo-textcomp__handle {
-  position: absolute;
-  top: 0;
-  width: 10px;
-  height: 100%;
-  cursor: ew-resize;
-  z-index: 5;
-  background: transparent;
+/* selection chrome — only shown while the component is active (utilitarian) */
+.byo-textcomp__chrome { position: absolute; inset: 0; pointer-events: none; display: none; z-index: 6; }
+.byo-textcomp--active .byo-textcomp__chrome { display: block; }
+.byo-textcomp--active { outline: 1px solid rgba(64,120,255,0.7); outline-offset: 0; }
+.byo-textcomp--preview.byo-textcomp--active { outline: none; }
+.byo-textcomp__bound {
+  position: absolute; inset: 0;
+  box-shadow: 0 0 0 1px rgba(64,120,255,0.35) inset;
 }
-.byo-textcomp__handle::before {
-  content: "";
-  position: absolute;
-  top: 50%; transform: translateY(-50%);
-  left: 3px;
-  width: 4px; height: 36px;
-  border-radius: 2px;
-  background: rgba(0,0,0,0.18);
+/* margin shading: translucent bands from each box edge out to the page edge */
+.byo-textcomp__margin { position: absolute; background: rgba(64,120,255,0.07); pointer-events: none; }
+/* 8 resize/move handles + a top move grip */
+.byo-textcomp__h {
+  position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px;
+  background: #fff; border: 1.5px solid rgba(64,120,255,0.9); border-radius: 2px;
+  pointer-events: auto; box-sizing: border-box; z-index: 7;
 }
-.byo-textcomp__handle:hover::before { background: rgba(0,0,0,0.4); }
-.byo-textcomp__handle--left { left: 0; }
-.byo-textcomp__handle--right { right: 0; }
-.byo-textcomp__handle--right::before { left: auto; right: 3px; }
+.byo-textcomp__h--tl { left: 0;   top: 0;   cursor: move; }
+.byo-textcomp__h--tr { left: 100%;top: 0;   cursor: move; }
+.byo-textcomp__h--bl { left: 0;   top: 100%;cursor: move; }
+.byo-textcomp__h--br { left: 100%;top: 100%;cursor: move; }
+.byo-textcomp__h--l  { left: 0;   top: 50%; cursor: ew-resize; }
+.byo-textcomp__h--r  { left: 100%;top: 50%; cursor: ew-resize; }
+.byo-textcomp__h--t  { left: 50%; top: 0;   cursor: ns-resize; }
+.byo-textcomp__h--b  { left: 50%; top: 100%;cursor: ns-resize; }
+.byo-textcomp__readout {
+  position: absolute; left: 0; top: -20px; height: 16px; line-height: 16px;
+  padding: 0 5px; font: 10px/16px system-ui, sans-serif; color: #fff;
+  background: rgba(64,120,255,0.95); border-radius: 3px; white-space: nowrap;
+  pointer-events: none; display: none;
+}
+.byo-textcomp__chrome--dragging .byo-textcomp__readout { display: block; }
 .byo-textcomp.byo-textcomp--warped .byo-word { visibility: hidden; }
 .byo-textcomp__warphost {
   position: fixed;
@@ -175,10 +191,20 @@
       this.id = ++_seq;
       this.mount = opts.mount || document.body;
 
-      // layout state
-      this.leftPct = 0;
-      this.rightPct = 0;
-      this.topPx = opts.top != null ? opts.top : null;  // null = normal flow
+      // layout state — free 2D corner-anchor placement (% of mount). anchor is
+      // the corner the user last grabbed (kept for serialize / resize intent);
+      // xPct/yPct is the box's top-left, widthPct its width. Height is auto.
+      this.pos = { anchor: 'tl', xPct: 0, yPct: 0, widthPct: 100 };
+      this.dock = null;                 // { relTo, side:'right|left|above|below', gapPct } or null
+      this.z = 0;                       // stacking order (CSS z-index + warp host)
+      this.active = false;              // selected -> shows boundary + handles + panels
+      this.preview = false;             // preview mode hides editing chrome
+
+      // per-breakpoint variants: each is a full serialize() payload. The live
+      // DOM reflects the active breakpoint; switching saves the current one and
+      // restores the other (cloning it the first time).
+      this.breakpoint = 'desktop';
+      this.variants = { desktop: null, mobile: null };
 
       // semantic + format state
       this.tag = 'untagged';
@@ -190,8 +216,11 @@
       this._warpHost = null;
       this._warpCanvas = null;          // persistent backing store fed to setSourceCanvas
 
-      // selection state (array of word spans)
+      // selection state (array of word spans) — AUTHORITATIVE, decoupled from
+      // the live DOM Selection. Only deliberate in-editable gestures change it;
+      // panel focus never collapses it (see _refreshSelectionFromCaret).
       this._selection = [];
+      this._selectionSnapshot = [];     // last non-empty selection before focusout
       this._anchorWord = null;          // for shift-range extension
       this._dragging = false;           // pointer drag across words
       this._dragAnchor = null;
@@ -199,13 +228,33 @@
       // texture fills: word span -> { sampleCanvas, sig }
       this._fills = new Map();
 
+      // word-replacement effects, keyed by fx id (the anchor span carries
+      // data-fx="<id>"); the controller (BYO.WordEffects) drives them.
+      this.effects = {};
+      this._fxSeq = 0;
+
       this._buildDom();
+
+      // inline-formatting + plain-text paste helper (owns no DOM; formats the
+      // per-word spans). Re-wrap after a paste keeps the word model coherent.
+      this.editor = (BYO.Editor && BYO.Editor.create)
+        ? BYO.Editor.create(this.editable, {
+            onChange: () => { this._reWrapAll(); this._pruneSelection(); if (this.isWarped) this._rasterizeIntoWarp(); }
+          })
+        : null;
+
+      // word-effects controller (scrub + autocycle); owns no DOM, drives the
+      // anchor spans. Created after the editable exists.
+      this._fxController = (BYO.WordEffects && BYO.WordEffects.create)
+        ? BYO.WordEffects.create(this) : null;
+
       this._bindEvents();
 
       if (opts.state) this.deserialize(opts.state);
       else this._reWrapAll();
 
       this._applyLayout();
+      if (this._fxController) this._fxController.refresh();
     }
 
     /* ---------------- DOM ---------------- */
@@ -226,30 +275,53 @@
       line.appendChild(document.createTextNode('Edit me'));
       ed.appendChild(line);
 
-      const hL = document.createElement('div');
-      hL.className = 'byo-textcomp__handle byo-textcomp__handle--left';
-      const hR = document.createElement('div');
-      hR.className = 'byo-textcomp__handle byo-textcomp__handle--right';
+      // selection chrome (hidden until active): boundary + margin shading +
+      // 8 handles (4 corners move, l/r resize width, t/b nudge vertically) +
+      // a drag readout. pointer-events only on the handles.
+      const chrome = document.createElement('div');
+      chrome.className = 'byo-textcomp__chrome';
+      const bound = document.createElement('div');
+      bound.className = 'byo-textcomp__bound';
+      chrome.appendChild(bound);
+      this._marginEls = {};
+      ['l', 'r', 't', 'b'].forEach((m) => {
+        const me = document.createElement('div');
+        me.className = 'byo-textcomp__margin byo-textcomp__margin--' + m;
+        chrome.appendChild(me);
+        this._marginEls[m] = me;
+      });
+      this._handles = {};
+      ['tl', 'tr', 'bl', 'br', 'l', 'r', 't', 'b'].forEach((k) => {
+        const h = document.createElement('div');
+        h.className = 'byo-textcomp__h byo-textcomp__h--' + k;
+        chrome.appendChild(h);
+        this._handles[k] = h;
+      });
+      const readout = document.createElement('div');
+      readout.className = 'byo-textcomp__readout';
+      chrome.appendChild(readout);
+      this._readout = readout;
+      this._chrome = chrome;
 
-      root.appendChild(hL);
-      root.appendChild(hR);
+      root.appendChild(chrome);
       root.appendChild(ed);
       this.mount.appendChild(root);
 
       this.el = root;
       this.editable = ed;
-      this.handleLeft = hL;
-      this.handleRight = hR;
     }
 
     /* ---------------- events ---------------- */
     _bindEvents() {
       const ed = this.editable;
 
-      // caret-preserving re-wrap + warp sync on edit
+      // caret-preserving re-wrap + warp sync on edit. A re-wrap rebuilds the
+      // word spans, so we only PRUNE detached entries here — never re-pick the
+      // selection from the caret (that would collapse a multi-word selection
+      // mid-edit). Caret-driven narrowing happens on real key navigation only.
       ed.addEventListener('input', () => {
         this._reWrapAll();
-        this._refreshSelectionFromCaret();
+        this._pruneSelection();
         if (this.isWarped) this._rasterizeIntoWarp();
       });
       ed.addEventListener('keyup', () => this._refreshSelectionFromCaret());
@@ -259,13 +331,20 @@
       ed.addEventListener('mousemove', (e) => this._onWordMouseMove(e));
       window.addEventListener('mouseup', () => { this._dragging = false; });
 
-      // mark this component active for the dev UI's getActive()
-      ed.addEventListener('focus', () => { TextComponent._active = this; });
-      this.el.addEventListener('mousedown', () => { TextComponent._active = this; });
+      // snapshot the selection when focus leaves the editable (e.g. the user
+      // clicks a dev panel's number / hex input). Panel ops call
+      // restoreSelection() so they still target the words that were selected.
+      ed.addEventListener('focusout', () => {
+        if (this._selection.length) this._selectionSnapshot = this._selection.slice();
+      });
 
-      // drag handles -> live leftPct / rightPct
-      this._bindHandle(this.handleLeft, 'left');
-      this._bindHandle(this.handleRight, 'right');
+      // mark this component active (selected) for the dev UI's getActive() and
+      // to show the selection chrome. focus + any mousedown inside activates.
+      ed.addEventListener('focus', () => this.activate());
+      this.el.addEventListener('mousedown', () => this.activate());
+
+      // chrome drag handles -> live position / size
+      Object.keys(this._handles).forEach((k) => this._bindHandle(this._handles[k], k));
 
       // resize: reposition warp overlay + re-rasterize (fixes shader-resize bug)
       this._onResize = () => {
@@ -275,80 +354,198 @@
           this._rasterizeIntoWarp();
         }
         this._repositionFills();
+        this._updateMarginViz();
+        if (TextComponent._onGeometryChange) TextComponent._onGeometryChange(this);
       };
       window.addEventListener('resize', this._onResize);
     }
 
-    _bindHandle(handle, side) {
+    // Drag a chrome handle. Corners (tl/tr/bl/br) MOVE the whole box (height is
+    // auto, so diagonal resize is meaningless); l/r resize width; t/b nudge the
+    // box vertically. All maths in % of the viewport (the component's containing
+    // block, since it is a direct child of <body>). A manual drag clears docking.
+    _bindHandle(handle, kind) {
       handle.addEventListener('mousedown', (e) => {
         e.preventDefault();
-        TextComponent._active = this;
-        const mountRect = this.mount.getBoundingClientRect();
-        const mountW = Math.max(1, mountRect.width);
+        e.stopPropagation();
+        this.activate();
+        this.dock = null;
+        if (kind.length === 2) this.pos.anchor = kind;   // grabbed corner is the anchor
+        const vW = Math.max(1, window.innerWidth), vH = Math.max(1, window.innerHeight);
+        const s0 = { x: e.clientX, y: e.clientY, xPct: this.pos.xPct, yPct: this.pos.yPct, wPct: this.pos.widthPct };
+        this._chrome.classList.add('byo-textcomp__chrome--dragging');
         const onMove = (ev) => {
-          const x = ev.clientX - mountRect.left;
-          if (side === 'left') {
-            let pct = (x / mountW) * 100;
-            pct = Math.max(0, Math.min(pct, 100 - this.rightPct - 5));
-            this.leftPct = pct;
-          } else {
-            let pct = ((mountW - x) / mountW) * 100;
-            pct = Math.max(0, Math.min(pct, 100 - this.leftPct - 5));
-            this.rightPct = pct;
+          const dxPct = ((ev.clientX - s0.x) / vW) * 100;
+          const dyPct = ((ev.clientY - s0.y) / vH) * 100;
+          if (kind.length === 2) {                       // corner -> move
+            this.pos.xPct = s0.xPct + dxPct;
+            this.pos.yPct = s0.yPct + dyPct;
+          } else if (kind === 'l') {                     // left edge -> resize from left
+            this.pos.xPct = s0.xPct + dxPct;
+            this.pos.widthPct = s0.wPct - dxPct;
+          } else if (kind === 'r') {                     // right edge -> resize width
+            this.pos.widthPct = s0.wPct + dxPct;
+          } else {                                       // t / b -> vertical move
+            this.pos.yPct = s0.yPct + dyPct;
           }
+          this._clampPos();
           this._applyLayout();
-          if (this._onLayoutChange) this._onLayoutChange(this.leftPct, this.rightPct);
-          if (this.isWarped) {
-            this._positionWarpHost();
-            if (this.warp && this.warp.resize) this.warp.resize();
-            this._rasterizeIntoWarp();
-          }
-          this._repositionFills();
+          this._updateReadout();
+          this._afterGeometryChange();
         };
         const onUp = () => {
           window.removeEventListener('mousemove', onMove);
           window.removeEventListener('mouseup', onUp);
+          this._chrome.classList.remove('byo-textcomp__chrome--dragging');
+          if (this._onLayoutChange) this._onLayoutChange();
         };
         window.addEventListener('mousemove', onMove);
         window.addEventListener('mouseup', onUp);
       });
     }
 
-    // app/dev-ui hook to reflect handle drags into number inputs
-    onLayoutChange(cb) { this._onLayoutChange = cb; }
-
-    /* ---------------- layout ---------------- */
-    _applyLayout() {
-      const s = this.el.style;
-      s.marginLeft = this.leftPct + '%';
-      s.marginRight = this.rightPct + '%';
-      s.width = 'auto';      // margins inset both edges; height stays auto (content)
-      if (this.topPx != null) {
-        s.position = 'absolute';
-        s.left = this.leftPct + '%';
-        s.right = this.rightPct + '%';
-        s.top = this.topPx + 'px';
-        s.marginLeft = s.marginRight = '0';
-        s.width = 'auto';
-      }
+    _clampPos() {
+      const p = this.pos;
+      p.widthPct = Math.max(5, Math.min(200, p.widthPct));
+      p.xPct = Math.max(-20, Math.min(120, p.xPct));
+      p.yPct = Math.max(-10, Math.min(400, p.yPct));
     }
 
-    setLayout(leftPct, rightPct) {
-      if (leftPct != null) this.leftPct = Math.max(0, Math.min(95, leftPct));
-      if (rightPct != null) this.rightPct = Math.max(0, Math.min(95, rightPct));
-      // prevent the two insets from summing past the width (negative/collapsed
-      // component). The handle-drag path already clamps; this guards the
-      // number-input path. Trim whichever value was just set.
-      if (this.leftPct + this.rightPct > 95) {
-        if (rightPct != null) this.rightPct = Math.max(0, 95 - this.leftPct);
-        else this.leftPct = Math.max(0, 95 - this.rightPct);
-      }
-      this._applyLayout();
+    // app/dev-ui hook: notified (no args) after a handle drag so panels re-read pos
+    onLayoutChange(cb) { this._onLayoutChange = cb; }
+
+    _afterGeometryChange() {
       if (this.isWarped) {
         this._positionWarpHost();
         if (this.warp && this.warp.resize) this.warp.resize();
         this._rasterizeIntoWarp();
       }
+      this._repositionFills();
+      if (TextComponent._onGeometryChange) TextComponent._onGeometryChange(this);
+    }
+
+    /* ---------------- layout (free 2D corner-anchor, % of viewport) ---------------- */
+    _applyLayout() {
+      const s = this.el.style;
+      s.position = 'absolute';
+      s.margin = '0';
+      s.left = this.pos.xPct + '%';
+      s.top = this.pos.yPct + '%';
+      s.width = this.pos.widthPct + '%';
+      s.zIndex = String(this.z || 0);
+      this._updateMarginViz();
+    }
+
+    // position the 4 translucent margin bands from each box edge to the page edge
+    _updateMarginViz() {
+      if (!this.active || !this._marginEls) return;
+      const m = this.mount.getBoundingClientRect();
+      const r = this.el.getBoundingClientRect();
+      const E = this._marginEls;
+      const lw = Math.max(0, r.left - m.left), rw = Math.max(0, m.right - r.right);
+      const th = Math.max(0, r.top - m.top), bh = Math.max(0, m.bottom - r.bottom);
+      E.l.style.cssText = 'position:absolute;background:rgba(64,120,255,0.07);top:0;bottom:0;left:' + (-lw) + 'px;width:' + lw + 'px;';
+      E.r.style.cssText = 'position:absolute;background:rgba(64,120,255,0.07);top:0;bottom:0;left:100%;width:' + rw + 'px;';
+      E.t.style.cssText = 'position:absolute;background:rgba(64,120,255,0.07);left:0;right:0;top:' + (-th) + 'px;height:' + th + 'px;';
+      E.b.style.cssText = 'position:absolute;background:rgba(64,120,255,0.07);left:0;right:0;top:100%;height:' + bh + 'px;';
+    }
+
+    _updateReadout() {
+      if (!this._readout) return;
+      const p = this.pos;
+      this._readout.textContent = Math.round(p.xPct) + ', ' + Math.round(p.yPct) + ' · w' + Math.round(p.widthPct) + '%';
+    }
+
+    /* public positioning API (dev-ui Layout panel + app docking) */
+    setPos(p) {
+      p = p || {};
+      if (p.anchor) this.pos.anchor = p.anchor;
+      if (p.xPct != null) this.pos.xPct = p.xPct;
+      if (p.yPct != null) this.pos.yPct = p.yPct;
+      if (p.widthPct != null) this.pos.widthPct = p.widthPct;
+      this._clampPos();
+      this._applyLayout();
+      this._afterGeometryChange();
+    }
+    setZ(z) { this.z = z | 0; this.el.style.zIndex = String(this.z); if (this._warpHost) this._warpHost.style.zIndex = String(40 + this.z); }
+    setDock(dock) { this.dock = dock || null; if (TextComponent._onGeometryChange) TextComponent._onGeometryChange(this); }
+
+    // resolve a dock against a reference component's screen rect (called by app)
+    applyDockFrom(refRect) {
+      if (!this.dock || !refRect) return;
+      const vW = Math.max(1, window.innerWidth), vH = Math.max(1, window.innerHeight);
+      const gap = (this.dock.gapPct || 0);
+      const refXPct = (refRect.left / vW) * 100, refYPct = (refRect.top / vH) * 100;
+      const refWPct = (refRect.width / vW) * 100, refHPct = (refRect.height / vH) * 100;
+      const side = this.dock.side;
+      if (side === 'right') { this.pos.xPct = refXPct + refWPct + gap; this.pos.yPct = refYPct; }
+      else if (side === 'left') { this.pos.xPct = refXPct - this.pos.widthPct - gap; this.pos.yPct = refYPct; }
+      else if (side === 'below') { this.pos.xPct = refXPct; this.pos.yPct = refYPct + refHPct + gap; }
+      else if (side === 'above') { this.pos.xPct = refXPct; this.pos.yPct = refYPct - refHPct - gap; }
+      this._clampPos();
+      this._applyLayout();
+      if (this.isWarped) { this._positionWarpHost(); if (this.warp && this.warp.resize) this.warp.resize(); this._rasterizeIntoWarp(); }
+      this._repositionFills();
+    }
+
+    /* ---------------- active / preview state ---------------- */
+    activate() {
+      if (TextComponent._active && TextComponent._active !== this) TextComponent._active.deactivate(true);
+      TextComponent._active = this;
+      if (!this.active) {
+        this.active = true;
+        this.el.classList.add('byo-textcomp--active');
+        this._updateMarginViz();
+      }
+      if (TextComponent._onActiveChange) TextComponent._onActiveChange(this);
+    }
+    deactivate(skipNotify) {
+      if (!this.active) return;
+      this.active = false;
+      this.el.classList.remove('byo-textcomp--active');
+      if (TextComponent._active === this) TextComponent._active = null;
+      if (!skipNotify && TextComponent._onActiveChange) TextComponent._onActiveChange(null);
+    }
+    setPreview(on) {
+      this.preview = !!on;
+      this.el.classList.toggle('byo-textcomp--preview', this.preview);
+      if (this.preview) this.deactivate(true);
+    }
+
+    /* ---------------- breakpoint variants (desktop / mobile) ----------------
+       Everything is per-breakpoint: a variant is a full serialize() payload.
+       Switching saves the current breakpoint and restores the target (cloning
+       the current one the first time the target is visited). */
+    setBreakpoint(bp) {
+      bp = bp === 'mobile' ? 'mobile' : 'desktop';
+      if (bp === this.breakpoint) return;
+      this.variants[this.breakpoint] = this.serialize();
+      if (!this.variants[bp]) this.variants[bp] = JSON.parse(JSON.stringify(this.variants[this.breakpoint]));
+      this.breakpoint = bp;
+      this.deserialize(this.variants[bp]);
+      if (this._fxController) this._fxController.refresh();
+    }
+    copyToOtherBreakpoint() {
+      const other = this.breakpoint === 'desktop' ? 'mobile' : 'desktop';
+      this.variants[other] = this.serialize();
+    }
+    // full per-breakpoint snapshot (for the document export)
+    serializeAll() {
+      this.variants[this.breakpoint] = this.serialize();
+      return { breakpoint: this.breakpoint, variants: { desktop: this.variants.desktop, mobile: this.variants.mobile } };
+    }
+    deserializeAll(state) {
+      state = state || {};
+      if (state.variants) {
+        this.variants = { desktop: state.variants.desktop || null, mobile: state.variants.mobile || null };
+        this.breakpoint = state.breakpoint === 'mobile' ? 'mobile' : 'desktop';
+        const payload = this.variants[this.breakpoint] || this.variants.desktop || this.variants.mobile;
+        if (payload) this.deserialize(payload);
+      } else {
+        this.deserialize(state);
+      }
+      if (this._fxController) this._fxController.refresh();
+      return this;
     }
 
     /* ---------------- per-word wrapping (caret + data-color preserving) ---------------- */
@@ -359,6 +556,7 @@
         this._normalizeLines();
       }
       this.editable.querySelectorAll('.byo-textcomp__line').forEach((l) => this._wrapLine(l));
+      if (this._fxController) this._fxController.refresh();
     }
 
     // ensure direct children of editable are .byo-textcomp__line wrappers
@@ -412,7 +610,11 @@
       line.querySelectorAll('.byo-word').forEach((w) => {
         prev.push({
           color: w.dataset.color || '',
-          filled: w.classList.contains('byo-word--filled')
+          filled: w.classList.contains('byo-word--filled'),
+          bold: w.getAttribute('data-bold') === '1',
+          italic: w.getAttribute('data-italic') === '1',
+          href: w.getAttribute('data-href') || '',
+          fx: w.getAttribute('data-fx') || ''
         });
       });
 
@@ -426,7 +628,11 @@
         const colAttr = p.color
           ? ` data-color="${escapeAttr(p.color)}" style="color:${escapeAttr(p.color)}"`
           : ' data-color=""';
-        html += `<span class="byo-word"${colAttr}>${escapeHtml(tok)}</span>`;
+        const fmtAttr = (p.bold ? ' data-bold="1"' : '') +
+          (p.italic ? ' data-italic="1"' : '') +
+          (p.href ? ` data-href="${escapeAttr(p.href)}"` : '') +
+          (p.fx ? ` data-fx="${escapeAttr(p.fx)}"` : '');
+        html += `<span class="byo-word"${colAttr}${fmtAttr}>${escapeHtml(tok)}</span>`;
         wordIdx++;
       }
       if (html === '') html = '<br>';
@@ -453,6 +659,7 @@
       this._selection.forEach((w) => w.classList.remove('byo-word--selected'));
       this._selection = words.filter(Boolean);
       this._selection.forEach((w) => w.classList.add('byo-word--selected'));
+      if (TextComponent._onSelectionChange) TextComponent._onSelectionChange(this);
     }
 
     _rangeBetween(a, b) {
@@ -484,15 +691,23 @@
       this._setSelection(this._rangeBetween(this._dragAnchor, word));
     }
 
-    // keep selection coherent when the caret moves (typing/arrow keys)
-    _refreshSelectionFromCaret() {
-      // drop selection entries whose spans were destroyed by a re-wrap
-      // (innerHTML rebuild) so we never operate on detached, unrendered nodes.
-      const validSelection = this._selection.filter((w) => this.editable.contains(w));
-      if (validSelection.length !== this._selection.length) {
+    // drop selection entries whose spans were destroyed by a re-wrap
+    // (innerHTML rebuild) so we never operate on detached, unrendered nodes.
+    _pruneSelection() {
+      const valid = this._selection.filter((w) => this.editable.contains(w));
+      if (valid.length !== this._selection.length) {
         this._selection.forEach((w) => { if (!this.editable.contains(w)) w.classList.remove('byo-word--selected'); });
-        this._selection = validSelection;
+        this._selection = valid;
       }
+    }
+
+    // keep selection coherent when the caret moves (typing / arrow keys). Prune
+    // detached spans, then follow the caret word — but ONLY when the current
+    // selection is a single word (or empty). A deliberate multi-word selection
+    // is preserved: a stray keyup must never collapse it down to one word.
+    _refreshSelectionFromCaret() {
+      this._pruneSelection();
+      if (this._selection.length > 1) return;
       const sel = window.getSelection();
       if (!sel || sel.rangeCount === 0) return;
       let node = sel.anchorNode;
@@ -505,11 +720,21 @@
       }
     }
 
+    // restore the pre-focusout selection if the live one was lost. Panel ops
+    // (setColor/applyFormat/fill) call this so editing via a focus-stealing
+    // control (number / hex input) still targets the intended words.
+    restoreSelection() {
+      if (this._selection.length || !this._selectionSnapshot.length) return;
+      const valid = this._selectionSnapshot.filter((w) => this.editable.contains(w));
+      if (valid.length) this._setSelection(valid);
+    }
+
     getSelection() { return this._selection.slice(); }
 
     /* ---------------- per-word colour ---------------- */
     setColor(hex) {
       if (!hex) return;
+      this.restoreSelection();
       const words = this._selection.length ? this._selection : this._allWords();
       words.forEach((w) => {
         w.dataset.color = hex;                 // authoritative exact hex
@@ -523,6 +748,7 @@
     /* ---------------- texture fill (background-clip:text per word) ---------------- */
     fillWithTexture(sampleCanvas) {
       if (!sampleCanvas) return;
+      this.restoreSelection();
       const words = this._selection.length ? this._selection : this._allWords();
       words.forEach((w) => this._fillWord(w, sampleCanvas));
       if (this.isWarped) this._rasterizeIntoWarp();
@@ -581,6 +807,7 @@
     }
 
     clearFill() {
+      this.restoreSelection();
       const words = this._selection.length ? this._selection : this._allWords();
       words.forEach((w) => this._unfillWord(w));
       if (this.isWarped) this._rasterizeIntoWarp();
@@ -589,6 +816,7 @@
     /* ---------------- formatting ---------------- */
     applyFormat(fmt) {
       fmt = fmt || {};
+      this.restoreSelection();
       this.format = Object.assign({}, this.format, fmt);
       // format applies to the whole component's editable (font family/weight/
       // spacing/axes are block-level here); BYO.Fonts.apply is the contract.
@@ -619,6 +847,72 @@
       this.tag = tag || 'untagged';
       this.editable.dataset.tag = this.tag;
     }
+
+    /* ---------------- inline formatting (per-word, via BYO.Editor) ----------------
+       Bold / italic / link are stored as per-word attributes on the selected
+       spans so the warp raster (computed-style per word) honours them. Each
+       toggles across the WHOLE selection; re-raster if warped. */
+    _fmtSpans() {
+      this.restoreSelection();
+      return this._selection.length ? this._selection : this._allWords();
+    }
+    toggleBold() { if (this.editor) { const on = this.editor.bold(this._fmtSpans()); if (this.isWarped) this._rasterizeIntoWarp(); return on; } }
+    toggleItalic() { if (this.editor) { const on = this.editor.italic(this._fmtSpans()); if (this.isWarped) this._rasterizeIntoWarp(); return on; } }
+    setLink(url) { if (this.editor) { this.editor.link(this._fmtSpans(), url); if (this.isWarped) this._rasterizeIntoWarp(); } }
+    clearLink() { if (this.editor) { this.editor.unlink(this._fmtSpans()); if (this.isWarped) this._rasterizeIntoWarp(); } }
+    removeInlineFormat() { if (this.editor) { this.editor.removeFormat(this._fmtSpans()); if (this.isWarped) this._rasterizeIntoWarp(); } }
+    // current inline-format state of the selection (for the dev-ui buttons)
+    inlineState() {
+      const spans = this._selection.length ? this._selection : [];
+      return this.editor
+        ? { bold: this.editor.isBold(spans), italic: this.editor.isItalic(spans), href: this.editor.linkOf(spans) }
+        : { bold: false, italic: false, href: '' };
+    }
+
+    /* ---------------- word-replacement effects ----------------
+       An effect anchors to ONE word (the single current selection). Its
+       replacements[0] is that word; cycling includes the original. */
+    selectionEffect() {
+      this.restoreSelection();
+      if (this._selection.length !== 1) return null;
+      const id = this._selection[0].getAttribute('data-fx');
+      return id ? this.effects[id] || null : null;
+    }
+    addEffect(type) {
+      this.restoreSelection();
+      if (this._selection.length !== 1) return null;
+      const span = this._selection[0];
+      let id = span.getAttribute('data-fx');
+      if (id && this.effects[id]) return this.effects[id];
+      id = 'fx' + (++this._fxSeq) + '_' + this.id;
+      span.setAttribute('data-fx', id);
+      const base = span.textContent;
+      const color = span.dataset.color || '';
+      const fx = {
+        id: id,
+        type: type === 'scrub' ? 'scrub' : 'autocycle',
+        params: BYO.WordEffects ? BYO.WordEffects.defaultParams() : {},
+        replacements: [{ text: base, color: color }],
+        idx: 0,
+        active: true
+      };
+      this.effects[id] = fx;
+      return fx;
+    }
+    removeEffectFromSelection() {
+      const fx = this.selectionEffect();
+      if (!fx) return;
+      const span = this.editable.querySelector('.byo-word[data-fx="' + fx.id + '"]');
+      if (span) {
+        span.removeAttribute('data-fx');
+        // restore the base word + colour
+        const rep = fx.replacements[0];
+        if (rep) { span.textContent = rep.text; if (rep.color) { span.dataset.color = rep.color; span.style.color = rep.color; } }
+      }
+      delete this.effects[fx.id];
+      if (this.isWarped) this._rasterizeIntoWarp();
+    }
+    refreshEffects() { if (this._fxController) this._fxController.refresh(); if (this.isWarped) this._rasterizeIntoWarp(); }
 
     /* =================================================================
        WARP — build a WarpBox over THIS component's rect, feed a HIGH-DPI
@@ -672,7 +966,9 @@
         left: Math.round(r.left) + 'px',
         top: Math.round(r.top) + 'px',
         width: Math.max(1, Math.round(r.width)) + 'px',
-        height: Math.max(1, Math.round(r.height)) + 'px'
+        height: Math.max(1, Math.round(r.height)) + 'px',
+        // mirror the component's z so warped boxes layer in the same order
+        zIndex: String(40 + (this.z || 0))
       });
     }
 
@@ -712,7 +1008,10 @@
         const fontSize = cs.fontSize || '16px';
         const fontFamily = cs.fontFamily || 'sans-serif';
         const fontWeight = cs.fontWeight || '800';
-        ctx.font = `${fontWeight} ${fontSize} ${fontFamily}`;
+        const fontStyle = cs.fontStyle && cs.fontStyle !== 'normal' ? cs.fontStyle + ' ' : '';
+        // include style (italic) + weight (bold) so per-word data-bold/italic
+        // render correctly on the warped cube as well as the flat DOM text.
+        ctx.font = `${fontStyle}${fontWeight} ${fontSize} ${fontFamily}`;
         // NOTE: canvas 2D fillText() does not honour letterSpacing/wordSpacing
         // (those are DOM-only properties), so the warped raster matches the flat
         // text minus any letter/word spacing applied via applyFormat. Known,
@@ -748,14 +1047,26 @@
           };
           if (!text.trim()) entry.empty = true;
           if (w.classList.contains('byo-word--filled')) entry.fill = true;
+          if (w.getAttribute('data-bold') === '1') entry.bold = true;
+          if (w.getAttribute('data-italic') === '1') entry.italic = true;
+          if (w.getAttribute('data-href')) entry.href = w.getAttribute('data-href');
+          // word-replacement effect: store its config and serialize the BASE
+          // word (replacements[0]) as the text so reload starts un-cycled.
+          const fxId = w.getAttribute('data-fx');
+          if (fxId && this.effects[fxId]) {
+            const fx = this.effects[fxId];
+            entry.fx = { type: fx.type, params: Object.assign({}, fx.params), replacements: fx.replacements.map(function (r) { return { text: r.text, color: r.color }; }) };
+            if (fx.replacements[0]) { entry.text = fx.replacements[0].text; if (fx.replacements[0].color) entry.color = fx.replacements[0].color; }
+          }
           words.push(entry);
         });
         lines.push({ words });
       });
 
       const out = {
-        leftPct: this.leftPct,
-        rightPct: this.rightPct,
+        pos: { anchor: this.pos.anchor, xPct: this.pos.xPct, yPct: this.pos.yPct, widthPct: this.pos.widthPct },
+        dock: this.dock ? { relTo: this.dock.relTo, side: this.dock.side, gapPct: this.dock.gapPct } : null,
+        z: this.z,
         tag: this.tag,
         lines: lines,
         format: Object.assign({}, this.format),
@@ -768,6 +1079,7 @@
             ? Object.assign({}, this.warp.surfaceOpts)
             : (this.isWarped ? { projection: 0.45, facingCut: 0.12 } : null),
           config: this.warp ? Object.assign({}, this.warp.config) : null,
+          size: this.warp ? this.warp.size : null,
           model: this.warp ? this._serializeModel(this.warp.model) : null
         }
       };
@@ -785,14 +1097,32 @@
 
     deserialize(state) {
       state = state || {};
-      this.leftPct = state.leftPct != null ? state.leftPct : 0;
-      this.rightPct = state.rightPct != null ? state.rightPct : 0;
+      // detach any existing warp first so re-deserializing (e.g. switching
+      // breakpoints) doesn't leave a stale overlay when the new state differs.
+      this.detachWarp();
+      // positioning: prefer the 2D corner-anchor model; migrate legacy
+      // leftPct/rightPct (full-width inset) into it for old documents.
+      if (state.pos) {
+        this.pos = {
+          anchor: state.pos.anchor || 'tl',
+          xPct: state.pos.xPct != null ? state.pos.xPct : 0,
+          yPct: state.pos.yPct != null ? state.pos.yPct : 0,
+          widthPct: state.pos.widthPct != null ? state.pos.widthPct : 100
+        };
+      } else {
+        const l = state.leftPct || 0, r = state.rightPct || 0;
+        this.pos = { anchor: 'tl', xPct: l, yPct: 0, widthPct: Math.max(5, 100 - l - r) };
+      }
+      this.dock = state.dock || null;
+      this.z = state.z || 0;
       this.tag = state.tag || 'untagged';
       this.editable.dataset.tag = this.tag;
 
-      // rebuild lines/words with exact colours
+      // rebuild lines/words with exact colours (effects are re-registered from
+      // the per-word fx config below)
       const ed = this.editable;
       ed.innerHTML = '';
+      this.effects = {};
       const lines = (state.lines && state.lines.length) ? state.lines : [{ words: [{ text: 'Edit me', color: '' }] }];
       lines.forEach((ln) => {
         const line = document.createElement('div');
@@ -808,6 +1138,21 @@
             if (wd.color) { span.dataset.color = wd.color; span.style.color = wd.color; }
             else span.dataset.color = '';
             if (wd.fill) span.classList.add('byo-word--filled');
+            if (wd.bold) span.setAttribute('data-bold', '1');
+            if (wd.italic) span.setAttribute('data-italic', '1');
+            if (wd.href) span.setAttribute('data-href', wd.href);
+            if (wd.fx && wd.fx.replacements) {
+              const id = 'fx' + (++this._fxSeq) + '_' + this.id;
+              span.setAttribute('data-fx', id);
+              this.effects[id] = {
+                id: id,
+                type: wd.fx.type === 'scrub' ? 'scrub' : 'autocycle',
+                params: Object.assign(BYO.WordEffects ? BYO.WordEffects.defaultParams() : {}, wd.fx.params || {}),
+                replacements: wd.fx.replacements.map(function (r) { return { text: r.text, color: r.color }; }),
+                idx: 0,
+                active: true
+              };
+            }
             line.appendChild(span);
             if (i < words.length - 1) line.appendChild(document.createTextNode(' '));
           });
@@ -831,6 +1176,7 @@
         // defaults if surfaceOpts is null (mid-drag serialize edge case).
         this.attachWarp(state.warp.surfaceOpts || {});
         if (this.warp) {
+          if (state.warp.size != null && this.warp.setSize) this.warp.setSize(state.warp.size);
           if (state.warp.config) {
             // motion config is live two-way bound; copy known keys
             Object.assign(this.warp.config, state.warp.config);
@@ -854,6 +1200,8 @@
     /* ---------------- teardown ---------------- */
     destroy() {
       this.detachWarp();
+      if (this.editor) this.editor.destroy();
+      if (this._fxController) this._fxController.destroy();
       window.removeEventListener('resize', this._onResize);
       if (this._fillRaf) cancelAnimationFrame(this._fillRaf);
       this._fills.clear();
@@ -863,10 +1211,21 @@
   }
 
   TextComponent._active = null;
+  TextComponent._onActiveChange = null;    // dev-ui subscribes (show/hide panels)
+  TextComponent._onGeometryChange = null;  // app subscribes (recompute docked boxes)
+  TextComponent._onSelectionChange = null; // dev-ui subscribes (refresh format/effects)
 
   BYO.TextComponent = {
     create(opts) { return new TextComponent(opts || {}); },
-    // dev-ui getActive() convenience: last-interacted component
-    getActive() { return TextComponent._active; }
+    // dev-ui getActive() convenience: last-interacted (active/selected) component
+    getActive() { return TextComponent._active; },
+    // dev-ui: fired with the active component (or null on deselect)
+    onActiveChange(cb) { TextComponent._onActiveChange = cb; },
+    // app: fired with a component whose geometry changed (for relative docking)
+    onGeometryChange(cb) { TextComponent._onGeometryChange = cb; },
+    // dev-ui: fired when the word selection changes (refresh format/effects UI)
+    onSelectionChange(cb) { TextComponent._onSelectionChange = cb; },
+    // global deselect (app binds it to clicks on empty page)
+    deselect() { if (TextComponent._active) TextComponent._active.deactivate(); }
   };
 })();

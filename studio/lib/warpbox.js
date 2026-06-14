@@ -26,7 +26,8 @@
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
   // faceOffset clamp range (frozen): [-0.9, 3]
   const OFF_LO = -0.9, OFF_HI = 3;
-  const CUBE_SIZE = 1;            // base half-extent (matches projected-cube CONFIG.cubeSize)
+  const CUBE_SIZE = 1;            // DEFAULT base half-extent (matches projected-cube CONFIG.cubeSize)
+  const SIZE_LO = 0.1, SIZE_HI = 4;  // configurable cube-size range (GUI bound)
   let _seq = 0;                   // unique overlay-canvas id per instance
 
   class WarpBox {
@@ -39,6 +40,9 @@
       }
       opts = opts || {};
       this.container = container;
+      // configurable cube base half-extent (was the hard-coded CUBE_SIZE);
+      // the Warp panel binds this via setSize(). Bounds derive from it.
+      this.size = clamp(opts.size != null ? opts.size : CUBE_SIZE, SIZE_LO, SIZE_HI);
       this._raf = 0;
       this._visible = true;
       this._tex = null;            // CanvasTexture wrapping the caller's source canvas
@@ -144,7 +148,7 @@
 
     /* derive local bounds from faceOffset (epsilon guard so boxMax > boxMin in shader) */
     _deriveBounds() {
-      const fo = this.model.faceOffset, b = CUBE_SIZE, mn = this._boxMin, mx = this._boxMax;
+      const fo = this.model.faceOffset, b = this.size, mn = this._boxMin, mx = this._boxMax;
       mx.set(b + fo.xp, b + fo.yp, b + fo.zp);
       mn.set(-(b + fo.xn), -(b + fo.yn), -(b + fo.zn));
       mx.x = Math.max(mx.x, mn.x + 1e-3);
@@ -228,6 +232,10 @@
 
     start() { if (!this._raf) { this._clock.getDelta(); this._frame(); } }   // swallow first dt
     stop() { if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0; } }
+
+    // configurable cube size (GUI). Bounds re-derive from it each frame, so a
+    // change takes effect immediately; clamp keeps boxMax > boxMin valid.
+    setSize(v) { this.size = clamp(+v || CUBE_SIZE, SIZE_LO, SIZE_HI); }
 
     get config() { return this.motion.config; }   // live motion config (GUI two-way binds it)
     get isHovering() { return this.gizmo.isHovering; }

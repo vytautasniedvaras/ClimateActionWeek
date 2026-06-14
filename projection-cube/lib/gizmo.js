@@ -24,10 +24,15 @@
   const PRIORITY = { faceExtrude: 4, rotate: 3, translate: 1 };
   const DEFAULTS = {
     arrowLen: 1.1, headLen: 0.12, shaftR: 0.007, headR: 0.03,
-    faceRectSize: 0.24, faceRevealNear: 0.5, faceRevealFar: 0.14,
+    // wider + longer-range face reveal so an extruded face stays grabbable
+    // (was 0.5/0.14 -> the handle vanished mid-extrude and could not be pulled
+    //  back); larger hit quad below makes the face easier to grab.
+    faceRectSize: 0.24, faceRevealNear: 1.0, faceRevealFar: 0.06,
     extrudeArrowLen: 0.34, extrudeArrowGap: 0.16,
-    arcRadius: 0.62, arcTube: 0.008, arcThetaMin: 0.314, arcThetaMax: 1.257,
-    arcHitInner: 0.50, arcHitOuter: 0.74, arcHoverHalf: 0.30, arcReveal: 0.16,
+    // wider rotation-arc sector + radial hit band + reveal so the rotation
+    // arrows can be picked from many more viewing angles (was the hardest grab).
+    arcRadius: 0.62, arcTube: 0.008, arcThetaMin: 0.18, arcThetaMax: 1.39,
+    arcHitInner: 0.40, arcHitOuter: 0.84, arcHoverHalf: 0.30, arcReveal: 0.30,
     screenScale: 0.16, hoverGrow: 1.4, hoverLong: 1.15
   };
   const BASE = 1; // gizmo-local reference half-extent (root.scale maps it to world; no scene size dep)
@@ -68,7 +73,7 @@
       }
       cg.setAttribute('color', new THREE.BufferAttribute(colors, 3));
       const head = new THREE.Mesh(cg, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9, depthTest: false, depthWrite: false })); head.position.y = cfg.arrowLen + cfg.headLen / 2;
-      const hit = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, cfg.arrowLen + cfg.headLen, 6), this._hidden());
+      const hit = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, cfg.arrowLen + cfg.headLen, 6), this._hidden());
       hit.position.y = (cfg.arrowLen + cfg.headLen) / 2; g.add(shaft, head, hit);
       if (ax === 'x') g.rotation.z = -Math.PI / 2; if (ax === 'z') g.rotation.x = Math.PI / 2;  // +Y -> axis
       this._reg(g, { kind: 'translate', axis: ax }); Object.assign(g.userData, { head, apex, cg, col: c }); return g;
@@ -80,7 +85,7 @@
         new THREE.MeshBasicMaterial({ map: BYO.color.makeFaceGradientTexture(f.cA, f.cB), transparent: true, side: THREE.DoubleSide, depthTest: false, depthWrite: false }));
       const aShaft = new THREE.Mesh(new THREE.CylinderGeometry(cfg.shaftR, cfg.shaftR, cfg.extrudeArrowLen, 8), this._mat(f.cA)); aShaft.position.y = cfg.extrudeArrowGap + cfg.extrudeArrowLen / 2;
       const aHead = new THREE.Mesh(new THREE.ConeGeometry(cfg.headR, cfg.headLen, 12), this._mat(f.cA)); aHead.position.y = cfg.extrudeArrowGap + cfg.extrudeArrowLen + cfg.headLen / 2;
-      const hit = new THREE.Mesh(new THREE.PlaneGeometry(cfg.faceRectSize * 1.6, cfg.faceRectSize * 1.6), this._hidden());
+      const hit = new THREE.Mesh(new THREE.PlaneGeometry(cfg.faceRectSize * 2.2, cfg.faceRectSize * 2.2), this._hidden());
       rect.renderOrder = aHead.renderOrder = aShaft.renderOrder = hit.renderOrder = 999; g.add(rect, aShaft, aHead, hit);
       g.quaternion.setFromUnitVectors(AXV.y, AXV[f.ax].clone().multiplyScalar(f.s)); // +Y -> outward normal
       this._reg(g, { kind: 'faceExtrude', faceId: id }); g.visible = false; return g;

@@ -78,6 +78,11 @@
     el.textContent = text;
     el.style.cssText = 'width:100%;padding:4px;margin:2px 0;font:inherit;cursor:pointer;' +
       'border:1px solid #ccc;border-radius:3px;background:#fff;';
+    // don't steal focus from the editable: a button click must not blur the
+    // contenteditable (which would drop the live selection before the op runs).
+    // (Safe for buttons — unlike range inputs, which need the default mousedown
+    // to start a thumb drag, so we never preventDefault those.)
+    el.addEventListener('mousedown', function (e) { e.preventDefault(); });
     return el;
   }
 
@@ -88,6 +93,10 @@
     if (!Array.isArray(state.recentColors)) state.recentColors = [];
     const srcObj = cfg.sources || {};
     const colorSources = [srcObj.video, srcObj.img].filter(Boolean);
+
+    // forward-declared so the active-component retarget can reference them
+    // before the Effects panel is built (see the effects section below).
+    let effectsPanel = null, refreshEffects = null;
 
     /* =============================================================
        COLOUR panel
@@ -173,6 +182,42 @@
     tagRow.appendChild(tagSel);
     formatPanel.body.appendChild(tagRow);
 
+    // inline formatting: bold / italic / link / clear — applied per-word to the
+    // selection (via active.toggleBold/toggleItalic/setLink/removeInlineFormat).
+    const fmtRow = document.createElement('div');
+    fmtRow.style.cssText = 'display:flex;gap:4px;margin:2px 0 6px;';
+    function inlineBtn(label, w) {
+      const b = button(label);
+      b.style.cssText += 'width:auto;flex:' + (w || '1') + ';margin:0;';
+      fmtRow.appendChild(b);
+      return b;
+    }
+    const boldBtn = inlineBtn('B'); boldBtn.style.fontWeight = '800';
+    const italicBtn = inlineBtn('I'); italicBtn.style.fontStyle = 'italic';
+    const linkBtn = inlineBtn('Link', '2');
+    const clearFmtBtn = inlineBtn('Clear', '2');
+    formatPanel.body.appendChild(fmtRow);
+
+    function refreshInlineButtons() {
+      const a = getActive();
+      const st = a && a.inlineState ? a.inlineState() : { bold: false, italic: false, href: '' };
+      boldBtn.style.background = st.bold ? '#cfe0ff' : '#fff';
+      italicBtn.style.background = st.italic ? '#cfe0ff' : '#fff';
+      linkBtn.style.background = st.href ? '#cfe0ff' : '#fff';
+    }
+    boldBtn.addEventListener('click', function () { const a = getActive(); if (a) { a.toggleBold(); refreshInlineButtons(); } });
+    italicBtn.addEventListener('click', function () { const a = getActive(); if (a) { a.toggleItalic(); refreshInlineButtons(); } });
+    linkBtn.addEventListener('click', function () {
+      const a = getActive();
+      if (!a) return;
+      const cur = a.inlineState ? a.inlineState().href : '';
+      const url = window.prompt('Link URL (blank to remove):', cur || 'https://');
+      if (url === null) return;
+      if (url.trim()) a.setLink(url.trim()); else a.clearLink();
+      refreshInlineButtons();
+    });
+    clearFmtBtn.addEventListener('click', function () { const a = getActive(); if (a) { a.removeInlineFormat(); refreshInlineButtons(); } });
+
     // current variable-axis values, keyed by axis name
     let axisValues = {};
 
@@ -238,32 +283,68 @@
     rebuildAxisSliders();
 
     /* =============================================================
-       LAYOUT panel — leftPct / rightPct (reflects live handle drags)
+       LAYOUT panel — free 2D placement (X/Y/Width %), z-order + docking
+       (reflects live handle drags; X/Y/W are % of the viewport)
        ============================================================= */
     const layoutPanel = BYO.Panel.create({ title: 'Layout', id: 'devui-layout', width: 220 });
     layoutPanel.setPosition(16, 320);
 
-    const leftRow = row('Left %');
-    const leftInput = numInput(0, 1);
-    leftInput.min = '0'; leftInput.max = '95';
-    leftRow.appendChild(leftInput);
-    layoutPanel.body.appendChild(leftRow);
-
-    const rightRow = row('Right %');
-    const rightInput = numInput(0, 1);
-    rightInput.min = '0'; rightInput.max = '95';
-    rightRow.appendChild(rightInput);
-    layoutPanel.body.appendChild(rightRow);
+    const xRow = row('X %'); const xInput = numInput(0, 0.5); xRow.appendChild(xInput); layoutPanel.body.appendChild(xRow);
+    const yRow = row('Y %'); const yInput = numInput(0, 0.5); yRow.appendChild(yInput); layoutPanel.body.appendChild(yRow);
+    const wRow = row('Width %'); const wInput = numInput(100, 0.5); wInput.min = '5'; wInput.max = '200'; wRow.appendChild(wInput); layoutPanel.body.appendChild(wRow);
+    const zRow = row('Z order'); const zInput = numInput(0, 1); zRow.appendChild(zInput); layoutPanel.body.appendChild(zRow);
 
     function applyLayoutNow() {
       const a = getActive();
       if (!a) return;
-      const l = leftInput.value === '' ? 0 : Number(leftInput.value);
-      const rr = rightInput.value === '' ? 0 : Number(rightInput.value);
-      a.setLayout(l, rr);
+      a.setPos({
+        xPct: xInput.value === '' ? 0 : Number(xInput.value),
+        yPct: yInput.value === '' ? 0 : Number(yInput.value),
+        widthPct: wInput.value === '' ? 100 : Number(wInput.value)
+      });
     }
-    leftInput.addEventListener('input', applyLayoutNow);
-    rightInput.addEventListener('input', applyLayoutNow);
+    xInput.addEventListener('input', applyLayoutNow);
+    yInput.addEventListener('input', applyLayoutNow);
+    wInput.addEventListener('input', applyLayoutNow);
+    zInput.addEventListener('input', function () { const a = getActive(); if (a) a.setZ(Number(zInput.value) || 0); });
+
+    // relative docking: dock the active box beside / above / below another
+    const dockRow = row('Dock');
+    const dockSide = selectInput([
+      { value: '', label: 'none' }, { value: 'right', label: 'right of' }, { value: 'left', label: 'left of' },
+      { value: 'below', label: 'below' }, { value: 'above', label: 'above' }
+    ]);
+    dockRow.appendChild(dockSide);
+    layoutPanel.body.appendChild(dockRow);
+    const dockToRow = row('Dock to');
+    const dockTo = selectInput([{ value: '', label: '(pick)' }]);
+    dockToRow.appendChild(dockTo);
+    layoutPanel.body.appendChild(dockToRow);
+    const gapRow = row('Gap %'); const gapInput = numInput(2, 0.5); gapRow.appendChild(gapInput); layoutPanel.body.appendChild(gapRow);
+
+    // populate the dock-target list from the app's component registry
+    function refreshDockTargets() {
+      const a = getActive();
+      const comps = (state.components || []);
+      const cur = dockTo.value;
+      dockTo.innerHTML = '';
+      const none = document.createElement('option'); none.value = ''; none.textContent = '(pick)'; dockTo.appendChild(none);
+      comps.forEach(function (c) {
+        if (c === a) return;
+        const op = document.createElement('option'); op.value = String(c.id); op.textContent = 'box #' + c.id; dockTo.appendChild(op);
+      });
+      dockTo.value = cur;
+    }
+    function applyDockNow() {
+      const a = getActive();
+      if (!a) return;
+      const side = dockSide.value;
+      if (!side || !dockTo.value) { a.setDock(null); return; }
+      a.setDock({ relTo: Number(dockTo.value), side: side, gapPct: Number(gapInput.value) || 0 });
+    }
+    dockSide.addEventListener('change', applyDockNow);
+    dockTo.addEventListener('change', applyDockNow);
+    gapInput.addEventListener('input', applyDockNow);
 
     /* =============================================================
        WARP panel — toggle + projection / edge / spin sliders
@@ -308,6 +389,77 @@
     spinRow.appendChild(spinOut);
     warpPanel.body.appendChild(spinRow);
 
+    /* ---- cube SHAPE controls: precise numeric path so the user rarely has to
+       fight the gizmo. size / 6 face offsets / position XYZ / rotation XYZ,
+       all bound live to active.warp (model + size). Two-way: a gizmo drag is
+       read back into these sliders each frame (see the readback loop). ---- */
+    const DEG = 180 / Math.PI;
+    function warpRow(label, min, max, step, val) {
+      const r = row(label);
+      const sl = rangeInput(min, max, step, val);
+      const out = valOut(sl.value);
+      r.appendChild(sl); r.appendChild(out);
+      warpPanel.body.appendChild(r);
+      sl.addEventListener('input', function () { out.textContent = sl.value; });
+      sl._out = out;
+      return sl;
+    }
+    function setSL(sl, v) { const n = Math.round(v * 100) / 100; sl.value = String(n); if (sl._out) sl._out.textContent = String(n); }
+
+    const sizeSlider = warpRow('Size', 0.1, 4, 0.01, 1);
+    sizeSlider.addEventListener('input', function () { const a = getActive(); if (a && a.warp && a.warp.setSize) a.warp.setSize(Number(sizeSlider.value)); });
+
+    // face offsets — clamped to a STRETCH-SAFE sub-range (the model allows up to
+    // 3, but planar UVs smear the text badly past ~1.5; keep the slider tighter).
+    const faceIds = ['xp', 'xn', 'yp', 'yn', 'zp', 'zn'];
+    const faceSliders = {};
+    faceIds.forEach(function (id) {
+      const sl = warpRow('Face ' + id, -0.9, 1.5, 0.01, 0);
+      faceSliders[id] = sl;
+      sl.addEventListener('input', function () {
+        const a = getActive();
+        if (a && a.warp && a.warp.model) { a.warp.model.faceOffset[id] = Number(sl.value); a.warp.gizmo.setTransform(a.warp.model); }
+      });
+    });
+
+    const posSliders = {};
+    ['x', 'y', 'z'].forEach(function (ax) {
+      const sl = warpRow('Pos ' + ax, -3, 3, 0.01, 0);
+      posSliders[ax] = sl;
+      sl.addEventListener('input', function () {
+        const a = getActive();
+        if (a && a.warp && a.warp.model) { a.warp.model.position[ax] = Number(sl.value); a.warp.gizmo.setTransform(a.warp.model); }
+      });
+    });
+
+    const rotSliders = {};
+    ['x', 'y', 'z'].forEach(function (ax) {
+      const sl = warpRow('Rot ' + ax, -180, 180, 1, 0);
+      rotSliders[ax] = sl;
+      sl.addEventListener('input', function () {
+        const a = getActive();
+        if (a && a.warp && a.warp.model) {
+          const e = new THREE.Euler(Number(rotSliders.x.value) / DEG, Number(rotSliders.y.value) / DEG, Number(rotSliders.z.value) / DEG, 'XYZ');
+          a.warp.model.quaternion.setFromEuler(e);
+          a.warp.gizmo.setTransform(a.warp.model);
+        }
+      });
+    });
+
+    // read the live model back into the cube-shape sliders (gizmo two-way sync)
+    function readbackCubeShape(a) {
+      if (!a || !a.warp) return;
+      if (a.warp.size != null) setSL(sizeSlider, a.warp.size);
+      const m = a.warp.model;
+      if (!m) return;
+      faceIds.forEach(function (id) { setSL(faceSliders[id], m.faceOffset[id] || 0); });
+      ['x', 'y', 'z'].forEach(function (ax) { setSL(posSliders[ax], m.position[ax] || 0); });
+      const e = new THREE.Euler().setFromQuaternion(m.quaternion, 'XYZ');
+      setSL(rotSliders.x, Math.round(e.x * DEG)); setSL(rotSliders.y, Math.round(e.y * DEG)); setSL(rotSliders.z, Math.round(e.z * DEG));
+    }
+    // while the gizmo is being dragged, mirror the transform into the panel
+    (function loop() { const a = getActive(); if (a && a.warp && a.warp.isDragging) readbackCubeShape(a); requestAnimationFrame(loop); })();
+
     function refreshWarpToggle() {
       const a = getActive();
       warpToggle.textContent = (a && a.isWarped) ? 'Disable warp' : 'Enable warp';
@@ -321,6 +473,7 @@
           if (a.warp.surfaceOpts.facingCut != null) edgeSlider.value = String(a.warp.surfaceOpts.facingCut);
         }
         if (a.warp.config && a.warp.config.slowSpin != null) spinSlider.value = String(a.warp.config.slowSpin);
+        readbackCubeShape(a);
       }
       projOut.textContent = projSlider.value;
       edgeOut.textContent = edgeSlider.value;
@@ -397,36 +550,126 @@
     });
 
     /* =============================================================
-       Retarget on active-component change: keep the panels reflecting
-       whichever component the user last touched. Poll lightly (the
-       active component is set on focus / mousedown inside the component).
+       EFFECTS panel — word-replacement effects on the single selected word
+       (scrub / auto-cycle) + an editable replacements list (text + colour).
        ============================================================= */
-    let lastActive = null;
-    function retargetIfChanged() {
-      const a = getActive();
-      if (a === lastActive) return;
-      lastActive = a;
-      if (!a) return;
-      // reflect this component's layout + warp state into the panels
-      leftInput.value = String(Math.round((a.leftPct || 0) * 10) / 10);
-      rightInput.value = String(Math.round((a.rightPct || 0) * 10) / 10);
-      tagSel.value = a.tag || 'untagged';
-      syncWarpControlsFromActive();
-      // re-open the colour picker so its seed colour + hex/RGB inputs + marker
-      // reflect the NEWLY-active component's selection (was only called once at
-      // init, leaving the panel showing the previous component's colour).
-      openColorPicker();
+    effectsPanel = BYO.Panel.create({ title: 'Effects', id: 'devui-effects', width: 240 });
+    effectsPanel.setPosition(250, 560);
+    const fxBody = document.createElement('div');
+    effectsPanel.body.appendChild(fxBody);
 
-      // reflect handle-drag layout changes live into the number inputs
-      if (typeof a.onLayoutChange === 'function') {
-        a.onLayoutChange(function (l, r) {
-          leftInput.value = String(Math.round(l * 10) / 10);
-          rightInput.value = String(Math.round(r * 10) / 10);
-        });
-      }
+    function fxParamRow(fx, key, label, min, max, step) {
+      const pr = row(label);
+      const sl = rangeInput(min, max, step, fx.params[key]);
+      const out = document.createElement('span');
+      out.textContent = String(fx.params[key]);
+      out.style.cssText = 'flex:0 0 30px;text-align:right;color:#777;';
+      sl.addEventListener('input', function () { fx.params[key] = Number(sl.value); out.textContent = sl.value; });
+      pr.appendChild(sl); pr.appendChild(out);
+      fxBody.appendChild(pr);
     }
-    const poll = setInterval(retargetIfChanged, 150);
-    retargetIfChanged();
+
+    refreshEffects = function () {
+      fxBody.innerHTML = '';
+      const a = getActive();
+      if (!a || !a.selectionEffect) return;
+      const fx = a.selectionEffect();
+      if (!fx) {
+        const hint = document.createElement('div');
+        hint.style.cssText = 'font-size:11px;color:#777;margin-bottom:6px;';
+        hint.textContent = 'Select a single word, then add an effect.';
+        fxBody.appendChild(hint);
+        const addAuto = button('Add auto-cycle');
+        addAuto.addEventListener('click', function () { if (a.addEffect) { a.addEffect('autocycle'); a.refreshEffects(); refreshEffects(); } });
+        const addScrub = button('Add scrub');
+        addScrub.addEventListener('click', function () { if (a.addEffect) { a.addEffect('scrub'); a.refreshEffects(); refreshEffects(); } });
+        fxBody.appendChild(addAuto); fxBody.appendChild(addScrub);
+        return;
+      }
+      const typeRow = row('Type');
+      const typeSel = selectInput([{ value: 'autocycle', label: 'auto-cycle' }, { value: 'scrub', label: 'scrub' }]);
+      typeSel.value = fx.type; typeRow.appendChild(typeSel); fxBody.appendChild(typeRow);
+      typeSel.addEventListener('change', function () { fx.type = typeSel.value; a.refreshEffects(); refreshEffects(); });
+
+      const listLabel = document.createElement('div');
+      listLabel.textContent = 'Replacement words'; listLabel.style.cssText = 'font-size:10px;opacity:.6;margin:6px 0 3px;';
+      fxBody.appendChild(listLabel);
+      fx.replacements.forEach(function (rep, i) {
+        const rRow = document.createElement('div');
+        rRow.style.cssText = 'display:flex;gap:3px;align-items:center;margin-bottom:3px;';
+        const txt = document.createElement('input');
+        txt.type = 'text'; txt.value = rep.text;
+        txt.style.cssText = 'flex:1 1 auto;min-width:0;padding:2px 4px;font:inherit;border:1px solid #ccc;border-radius:3px;';
+        txt.addEventListener('input', function () { rep.text = txt.value; a.refreshEffects(); });
+        const col = document.createElement('input');
+        col.type = 'color'; col.value = /^#[0-9a-f]{6}$/i.test(rep.color || '') ? rep.color : '#111111';
+        col.style.cssText = 'width:22px;height:22px;flex:0 0 22px;padding:0;border:1px solid #ccc;';
+        col.addEventListener('input', function () { rep.color = col.value; a.refreshEffects(); });
+        const up = button('↑'); up.style.cssText += 'width:22px;flex:0 0 22px;margin:0;padding:2px;';
+        up.addEventListener('click', function () { if (i > 0) { const t = fx.replacements[i - 1]; fx.replacements[i - 1] = fx.replacements[i]; fx.replacements[i] = t; refreshEffects(); } });
+        const rm = button('×'); rm.style.cssText += 'width:22px;flex:0 0 22px;margin:0;padding:2px;';
+        rm.addEventListener('click', function () { if (fx.replacements.length > 1) { fx.replacements.splice(i, 1); if (fx.idx >= fx.replacements.length) fx.idx = 0; a.refreshEffects(); refreshEffects(); } });
+        rRow.appendChild(txt); rRow.appendChild(col); rRow.appendChild(up); rRow.appendChild(rm);
+        fxBody.appendChild(rRow);
+      });
+      const addWord = button('Add word');
+      addWord.addEventListener('click', function () {
+        const base = fx.replacements[0] ? fx.replacements[0].color : '';
+        const color = BYO.WordEffects ? BYO.WordEffects.getContrastingColor(base) : '#888888';
+        fx.replacements.push({ text: 'word', color: color });
+        refreshEffects();
+      });
+      fxBody.appendChild(addWord);
+
+      if (fx.type === 'autocycle') {
+        fxParamRow(fx, 'changeRate', 'Rate', 0.1, 8, 0.1);
+        fxParamRow(fx, 'noiseAmount', 'Noise', 0, 1, 0.05);
+        fxParamRow(fx, 'noiseSpeed', 'N.speed', 0, 3, 0.05);
+        fxParamRow(fx, 'rampDuration', 'Ramp s', 0, 8, 0.1);
+        fxParamRow(fx, 'rampCurve', 'Curve', 1, 4, 0.1);
+      }
+      const rmFx = button('Remove effect');
+      rmFx.addEventListener('click', function () { a.removeEffectFromSelection(); refreshEffects(); });
+      fxBody.appendChild(rmFx);
+    };
+
+    /* =============================================================
+       Active-component driven (NO polling): the editing panels reflect and
+       show/hide with the active (selected) component. TextComponent fires
+       onActiveChange(component|null); deselect hides the editing panels.
+       ============================================================= */
+    const editingPanels = [colorPanel, formatPanel, layoutPanel, warpPanel, texturePanel, effectsPanel];
+    function showEditing(on) { editingPanels.forEach(function (p) { if (p) (on ? p.show() : p.hide()); }); }
+
+    function retarget(a) {
+      if (!a) { showEditing(false); return; }
+      showEditing(true);
+      xInput.value = String(Math.round((a.pos.xPct || 0) * 10) / 10);
+      yInput.value = String(Math.round((a.pos.yPct || 0) * 10) / 10);
+      wInput.value = String(Math.round((a.pos.widthPct != null ? a.pos.widthPct : 100) * 10) / 10);
+      zInput.value = String(a.z || 0);
+      tagSel.value = a.tag || 'untagged';
+      dockSide.value = a.dock ? a.dock.side : '';
+      gapInput.value = String(a.dock ? (a.dock.gapPct || 0) : 2);
+      refreshDockTargets();
+      if (a.dock) dockTo.value = String(a.dock.relTo);
+      syncWarpControlsFromActive();
+      refreshInlineButtons();
+      if (refreshEffects) refreshEffects();
+      // re-open the colour picker so its seed + hex/RGB + marker reflect the
+      // newly-active component's selection.
+      openColorPicker();
+      // reflect live handle drags into the X/Y/Width inputs
+      a.onLayoutChange(function () {
+        xInput.value = String(Math.round(a.pos.xPct * 10) / 10);
+        yInput.value = String(Math.round(a.pos.yPct * 10) / 10);
+        wInput.value = String(Math.round(a.pos.widthPct * 10) / 10);
+      });
+    }
+    BYO.TextComponent.onActiveChange(retarget);
+    // selection within the active component changed -> refresh format + effects
+    BYO.TextComponent.onSelectionChange(function () { refreshInlineButtons(); if (refreshEffects) refreshEffects(); });
+    retarget(getActive());
 
     return {
       colorPanel: colorPanel,
@@ -434,10 +677,11 @@
       layoutPanel: layoutPanel,
       warpPanel: warpPanel,
       texturePanel: texturePanel,
+      effectsPanel: effectsPanel,
       pushRecent: pushRecent,
+      retarget: retarget,
       destroy: function () {
-        clearInterval(poll);
-        [colorPanel, formatPanel, layoutPanel, warpPanel, texturePanel].forEach(function (p) { p.destroy(); });
+        editingPanels.forEach(function (p) { if (p) p.destroy(); });
         if (textureWindow) textureWindow.dispose();
       }
     };
