@@ -550,6 +550,90 @@
     });
 
     /* =============================================================
+       EFFECTS panel — word-replacement effects on the single selected word
+       (scrub / auto-cycle) + an editable replacements list (text + colour).
+       ============================================================= */
+    effectsPanel = BYO.Panel.create({ title: 'Effects', id: 'devui-effects', width: 240 });
+    effectsPanel.setPosition(250, 560);
+    const fxBody = document.createElement('div');
+    effectsPanel.body.appendChild(fxBody);
+
+    function fxParamRow(fx, key, label, min, max, step) {
+      const pr = row(label);
+      const sl = rangeInput(min, max, step, fx.params[key]);
+      const out = document.createElement('span');
+      out.textContent = String(fx.params[key]);
+      out.style.cssText = 'flex:0 0 30px;text-align:right;color:#777;';
+      sl.addEventListener('input', function () { fx.params[key] = Number(sl.value); out.textContent = sl.value; });
+      pr.appendChild(sl); pr.appendChild(out);
+      fxBody.appendChild(pr);
+    }
+
+    refreshEffects = function () {
+      fxBody.innerHTML = '';
+      const a = getActive();
+      if (!a || !a.selectionEffect) return;
+      const fx = a.selectionEffect();
+      if (!fx) {
+        const hint = document.createElement('div');
+        hint.style.cssText = 'font-size:11px;color:#777;margin-bottom:6px;';
+        hint.textContent = 'Select a single word, then add an effect.';
+        fxBody.appendChild(hint);
+        const addAuto = button('Add auto-cycle');
+        addAuto.addEventListener('click', function () { if (a.addEffect) { a.addEffect('autocycle'); a.refreshEffects(); refreshEffects(); } });
+        const addScrub = button('Add scrub');
+        addScrub.addEventListener('click', function () { if (a.addEffect) { a.addEffect('scrub'); a.refreshEffects(); refreshEffects(); } });
+        fxBody.appendChild(addAuto); fxBody.appendChild(addScrub);
+        return;
+      }
+      const typeRow = row('Type');
+      const typeSel = selectInput([{ value: 'autocycle', label: 'auto-cycle' }, { value: 'scrub', label: 'scrub' }]);
+      typeSel.value = fx.type; typeRow.appendChild(typeSel); fxBody.appendChild(typeRow);
+      typeSel.addEventListener('change', function () { fx.type = typeSel.value; a.refreshEffects(); refreshEffects(); });
+
+      const listLabel = document.createElement('div');
+      listLabel.textContent = 'Replacement words'; listLabel.style.cssText = 'font-size:10px;opacity:.6;margin:6px 0 3px;';
+      fxBody.appendChild(listLabel);
+      fx.replacements.forEach(function (rep, i) {
+        const rRow = document.createElement('div');
+        rRow.style.cssText = 'display:flex;gap:3px;align-items:center;margin-bottom:3px;';
+        const txt = document.createElement('input');
+        txt.type = 'text'; txt.value = rep.text;
+        txt.style.cssText = 'flex:1 1 auto;min-width:0;padding:2px 4px;font:inherit;border:1px solid #ccc;border-radius:3px;';
+        txt.addEventListener('input', function () { rep.text = txt.value; a.refreshEffects(); });
+        const col = document.createElement('input');
+        col.type = 'color'; col.value = /^#[0-9a-f]{6}$/i.test(rep.color || '') ? rep.color : '#111111';
+        col.style.cssText = 'width:22px;height:22px;flex:0 0 22px;padding:0;border:1px solid #ccc;';
+        col.addEventListener('input', function () { rep.color = col.value; a.refreshEffects(); });
+        const up = button('↑'); up.style.cssText += 'width:22px;flex:0 0 22px;margin:0;padding:2px;';
+        up.addEventListener('click', function () { if (i > 0) { const t = fx.replacements[i - 1]; fx.replacements[i - 1] = fx.replacements[i]; fx.replacements[i] = t; refreshEffects(); } });
+        const rm = button('×'); rm.style.cssText += 'width:22px;flex:0 0 22px;margin:0;padding:2px;';
+        rm.addEventListener('click', function () { if (fx.replacements.length > 1) { fx.replacements.splice(i, 1); if (fx.idx >= fx.replacements.length) fx.idx = 0; a.refreshEffects(); refreshEffects(); } });
+        rRow.appendChild(txt); rRow.appendChild(col); rRow.appendChild(up); rRow.appendChild(rm);
+        fxBody.appendChild(rRow);
+      });
+      const addWord = button('Add word');
+      addWord.addEventListener('click', function () {
+        const base = fx.replacements[0] ? fx.replacements[0].color : '';
+        const color = BYO.WordEffects ? BYO.WordEffects.getContrastingColor(base) : '#888888';
+        fx.replacements.push({ text: 'word', color: color });
+        refreshEffects();
+      });
+      fxBody.appendChild(addWord);
+
+      if (fx.type === 'autocycle') {
+        fxParamRow(fx, 'changeRate', 'Rate', 0.1, 8, 0.1);
+        fxParamRow(fx, 'noiseAmount', 'Noise', 0, 1, 0.05);
+        fxParamRow(fx, 'noiseSpeed', 'N.speed', 0, 3, 0.05);
+        fxParamRow(fx, 'rampDuration', 'Ramp s', 0, 8, 0.1);
+        fxParamRow(fx, 'rampCurve', 'Curve', 1, 4, 0.1);
+      }
+      const rmFx = button('Remove effect');
+      rmFx.addEventListener('click', function () { a.removeEffectFromSelection(); refreshEffects(); });
+      fxBody.appendChild(rmFx);
+    };
+
+    /* =============================================================
        Active-component driven (NO polling): the editing panels reflect and
        show/hide with the active (selected) component. TextComponent fires
        onActiveChange(component|null); deselect hides the editing panels.
@@ -583,6 +667,8 @@
       });
     }
     BYO.TextComponent.onActiveChange(retarget);
+    // selection within the active component changed -> refresh format + effects
+    BYO.TextComponent.onSelectionChange(function () { refreshInlineButtons(); if (refreshEffects) refreshEffects(); });
     retarget(getActive());
 
     return {

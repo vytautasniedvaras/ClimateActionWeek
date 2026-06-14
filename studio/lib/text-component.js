@@ -222,6 +222,11 @@
       // texture fills: word span -> { sampleCanvas, sig }
       this._fills = new Map();
 
+      // word-replacement effects, keyed by fx id (the anchor span carries
+      // data-fx="<id>"); the controller (BYO.WordEffects) drives them.
+      this.effects = {};
+      this._fxSeq = 0;
+
       this._buildDom();
 
       // inline-formatting + plain-text paste helper (owns no DOM; formats the
@@ -232,12 +237,18 @@
           })
         : null;
 
+      // word-effects controller (scrub + autocycle); owns no DOM, drives the
+      // anchor spans. Created after the editable exists.
+      this._fxController = (BYO.WordEffects && BYO.WordEffects.create)
+        ? BYO.WordEffects.create(this) : null;
+
       this._bindEvents();
 
       if (opts.state) this.deserialize(opts.state);
       else this._reWrapAll();
 
       this._applyLayout();
+      if (this._fxController) this._fxController.refresh();
     }
 
     /* ---------------- DOM ---------------- */
@@ -503,6 +514,7 @@
         this._normalizeLines();
       }
       this.editable.querySelectorAll('.byo-textcomp__line').forEach((l) => this._wrapLine(l));
+      if (this._fxController) this._fxController.refresh();
     }
 
     // ensure direct children of editable are .byo-textcomp__line wrappers
@@ -559,7 +571,8 @@
           filled: w.classList.contains('byo-word--filled'),
           bold: w.getAttribute('data-bold') === '1',
           italic: w.getAttribute('data-italic') === '1',
-          href: w.getAttribute('data-href') || ''
+          href: w.getAttribute('data-href') || '',
+          fx: w.getAttribute('data-fx') || ''
         });
       });
 
@@ -575,7 +588,8 @@
           : ' data-color=""';
         const fmtAttr = (p.bold ? ' data-bold="1"' : '') +
           (p.italic ? ' data-italic="1"' : '') +
-          (p.href ? ` data-href="${escapeAttr(p.href)}"` : '');
+          (p.href ? ` data-href="${escapeAttr(p.href)}"` : '') +
+          (p.fx ? ` data-fx="${escapeAttr(p.fx)}"` : '');
         html += `<span class="byo-word"${colAttr}${fmtAttr}>${escapeHtml(tok)}</span>`;
         wordIdx++;
       }
@@ -603,6 +617,7 @@
       this._selection.forEach((w) => w.classList.remove('byo-word--selected'));
       this._selection = words.filter(Boolean);
       this._selection.forEach((w) => w.classList.add('byo-word--selected'));
+      if (TextComponent._onSelectionChange) TextComponent._onSelectionChange(this);
     }
 
     _rangeBetween(a, b) {
@@ -812,6 +827,51 @@
         : { bold: false, italic: false, href: '' };
     }
 
+    /* ---------------- word-replacement effects ----------------
+       An effect anchors to ONE word (the single current selection). Its
+       replacements[0] is that word; cycling includes the original. */
+    selectionEffect() {
+      this.restoreSelection();
+      if (this._selection.length !== 1) return null;
+      const id = this._selection[0].getAttribute('data-fx');
+      return id ? this.effects[id] || null : null;
+    }
+    addEffect(type) {
+      this.restoreSelection();
+      if (this._selection.length !== 1) return null;
+      const span = this._selection[0];
+      let id = span.getAttribute('data-fx');
+      if (id && this.effects[id]) return this.effects[id];
+      id = 'fx' + (++this._fxSeq) + '_' + this.id;
+      span.setAttribute('data-fx', id);
+      const base = span.textContent;
+      const color = span.dataset.color || '';
+      const fx = {
+        id: id,
+        type: type === 'scrub' ? 'scrub' : 'autocycle',
+        params: BYO.WordEffects ? BYO.WordEffects.defaultParams() : {},
+        replacements: [{ text: base, color: color }],
+        idx: 0,
+        active: true
+      };
+      this.effects[id] = fx;
+      return fx;
+    }
+    removeEffectFromSelection() {
+      const fx = this.selectionEffect();
+      if (!fx) return;
+      const span = this.editable.querySelector('.byo-word[data-fx="' + fx.id + '"]');
+      if (span) {
+        span.removeAttribute('data-fx');
+        // restore the base word + colour
+        const rep = fx.replacements[0];
+        if (rep) { span.textContent = rep.text; if (rep.color) { span.dataset.color = rep.color; span.style.color = rep.color; } }
+      }
+      delete this.effects[fx.id];
+      if (this.isWarped) this._rasterizeIntoWarp();
+    }
+    refreshEffects() { if (this._fxController) this._fxController.refresh(); if (this.isWarped) this._rasterizeIntoWarp(); }
+
     /* =================================================================
        WARP — build a WarpBox over THIS component's rect, feed a HIGH-DPI
        rasterization, hide the flat DOM text while warped.
@@ -948,6 +1008,14 @@
           if (w.getAttribute('data-bold') === '1') entry.bold = true;
           if (w.getAttribute('data-italic') === '1') entry.italic = true;
           if (w.getAttribute('data-href')) entry.href = w.getAttribute('data-href');
+          // word-replacement effect: store its config and serialize the BASE
+          // word (replacements[0]) as the text so reload starts un-cycled.
+          const fxId = w.getAttribute('data-fx');
+          if (fxId && this.effects[fxId]) {
+            const fx = this.effects[fxId];
+            entry.fx = { type: fx.type, params: Object.assign({}, fx.params), replacements: fx.replacements.map(function (r) { return { text: r.text, color: r.color }; }) };
+            if (fx.replacements[0]) { entry.text = fx.replacements[0].text; if (fx.replacements[0].color) entry.color = fx.replacements[0].color; }
+          }
           words.push(entry);
         });
         lines.push({ words });
@@ -1005,9 +1073,11 @@
       this.tag = state.tag || 'untagged';
       this.editable.dataset.tag = this.tag;
 
-      // rebuild lines/words with exact colours
+      // rebuild lines/words with exact colours (effects are re-registered from
+      // the per-word fx config below)
       const ed = this.editable;
       ed.innerHTML = '';
+      this.effects = {};
       const lines = (state.lines && state.lines.length) ? state.lines : [{ words: [{ text: 'Edit me', color: '' }] }];
       lines.forEach((ln) => {
         const line = document.createElement('div');
@@ -1026,6 +1096,18 @@
             if (wd.bold) span.setAttribute('data-bold', '1');
             if (wd.italic) span.setAttribute('data-italic', '1');
             if (wd.href) span.setAttribute('data-href', wd.href);
+            if (wd.fx && wd.fx.replacements) {
+              const id = 'fx' + (++this._fxSeq) + '_' + this.id;
+              span.setAttribute('data-fx', id);
+              this.effects[id] = {
+                id: id,
+                type: wd.fx.type === 'scrub' ? 'scrub' : 'autocycle',
+                params: Object.assign(BYO.WordEffects ? BYO.WordEffects.defaultParams() : {}, wd.fx.params || {}),
+                replacements: wd.fx.replacements.map(function (r) { return { text: r.text, color: r.color }; }),
+                idx: 0,
+                active: true
+              };
+            }
             line.appendChild(span);
             if (i < words.length - 1) line.appendChild(document.createTextNode(' '));
           });
@@ -1074,6 +1156,7 @@
     destroy() {
       this.detachWarp();
       if (this.editor) this.editor.destroy();
+      if (this._fxController) this._fxController.destroy();
       window.removeEventListener('resize', this._onResize);
       if (this._fillRaf) cancelAnimationFrame(this._fillRaf);
       this._fills.clear();
@@ -1083,8 +1166,9 @@
   }
 
   TextComponent._active = null;
-  TextComponent._onActiveChange = null;   // dev-ui subscribes (show/hide panels)
-  TextComponent._onGeometryChange = null; // app subscribes (recompute docked boxes)
+  TextComponent._onActiveChange = null;    // dev-ui subscribes (show/hide panels)
+  TextComponent._onGeometryChange = null;  // app subscribes (recompute docked boxes)
+  TextComponent._onSelectionChange = null; // dev-ui subscribes (refresh format/effects)
 
   BYO.TextComponent = {
     create(opts) { return new TextComponent(opts || {}); },
@@ -1094,6 +1178,8 @@
     onActiveChange(cb) { TextComponent._onActiveChange = cb; },
     // app: fired with a component whose geometry changed (for relative docking)
     onGeometryChange(cb) { TextComponent._onGeometryChange = cb; },
+    // dev-ui: fired when the word selection changes (refresh format/effects UI)
+    onSelectionChange(cb) { TextComponent._onSelectionChange = cb; },
     // global deselect (app binds it to clicks on empty page)
     deselect() { if (TextComponent._active) TextComponent._active.deactivate(); }
   };
