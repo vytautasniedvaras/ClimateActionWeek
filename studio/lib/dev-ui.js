@@ -178,6 +178,42 @@
     tagRow.appendChild(tagSel);
     formatPanel.body.appendChild(tagRow);
 
+    // inline formatting: bold / italic / link / clear — applied per-word to the
+    // selection (via active.toggleBold/toggleItalic/setLink/removeInlineFormat).
+    const fmtRow = document.createElement('div');
+    fmtRow.style.cssText = 'display:flex;gap:4px;margin:2px 0 6px;';
+    function inlineBtn(label, w) {
+      const b = button(label);
+      b.style.cssText += 'width:auto;flex:' + (w || '1') + ';margin:0;';
+      fmtRow.appendChild(b);
+      return b;
+    }
+    const boldBtn = inlineBtn('B'); boldBtn.style.fontWeight = '800';
+    const italicBtn = inlineBtn('I'); italicBtn.style.fontStyle = 'italic';
+    const linkBtn = inlineBtn('Link', '2');
+    const clearFmtBtn = inlineBtn('Clear', '2');
+    formatPanel.body.appendChild(fmtRow);
+
+    function refreshInlineButtons() {
+      const a = getActive();
+      const st = a && a.inlineState ? a.inlineState() : { bold: false, italic: false, href: '' };
+      boldBtn.style.background = st.bold ? '#cfe0ff' : '#fff';
+      italicBtn.style.background = st.italic ? '#cfe0ff' : '#fff';
+      linkBtn.style.background = st.href ? '#cfe0ff' : '#fff';
+    }
+    boldBtn.addEventListener('click', function () { const a = getActive(); if (a) { a.toggleBold(); refreshInlineButtons(); } });
+    italicBtn.addEventListener('click', function () { const a = getActive(); if (a) { a.toggleItalic(); refreshInlineButtons(); } });
+    linkBtn.addEventListener('click', function () {
+      const a = getActive();
+      if (!a) return;
+      const cur = a.inlineState ? a.inlineState().href : '';
+      const url = window.prompt('Link URL (blank to remove):', cur || 'https://');
+      if (url === null) return;
+      if (url.trim()) a.setLink(url.trim()); else a.clearLink();
+      refreshInlineButtons();
+    });
+    clearFmtBtn.addEventListener('click', function () { const a = getActive(); if (a) { a.removeInlineFormat(); refreshInlineButtons(); } });
+
     // current variable-axis values, keyed by axis name
     let axisValues = {};
 

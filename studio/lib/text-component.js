@@ -55,6 +55,12 @@
 }
 .byo-textcomp__line { display: block; min-height: 1em; }
 .byo-word { color: inherit; }
+/* inline formatting as per-word attributes (warp-safe: getComputedStyle(word)
+   reflects these, so the rasterizer picks them up). */
+.byo-word[data-bold="1"] { font-weight: 700; }
+.byo-word[data-italic="1"] { font-style: italic; }
+.byo-word[data-href] { text-decoration: underline; }
+.byo-textcomp--preview .byo-word[data-href] { cursor: pointer; }
 .byo-word--selected {
   /* selection marker — utilitarian, not a site visual */
   background: rgba(64, 120, 255, 0.22);
@@ -203,6 +209,15 @@
       this._fills = new Map();
 
       this._buildDom();
+
+      // inline-formatting + plain-text paste helper (owns no DOM; formats the
+      // per-word spans). Re-wrap after a paste keeps the word model coherent.
+      this.editor = (BYO.Editor && BYO.Editor.create)
+        ? BYO.Editor.create(this.editable, {
+            onChange: () => { this._reWrapAll(); this._pruneSelection(); if (this.isWarped) this._rasterizeIntoWarp(); }
+          })
+        : null;
+
       this._bindEvents();
 
       if (opts.state) this.deserialize(opts.state);
@@ -425,7 +440,10 @@
       line.querySelectorAll('.byo-word').forEach((w) => {
         prev.push({
           color: w.dataset.color || '',
-          filled: w.classList.contains('byo-word--filled')
+          filled: w.classList.contains('byo-word--filled'),
+          bold: w.getAttribute('data-bold') === '1',
+          italic: w.getAttribute('data-italic') === '1',
+          href: w.getAttribute('data-href') || ''
         });
       });
 
@@ -439,7 +457,10 @@
         const colAttr = p.color
           ? ` data-color="${escapeAttr(p.color)}" style="color:${escapeAttr(p.color)}"`
           : ' data-color=""';
-        html += `<span class="byo-word"${colAttr}>${escapeHtml(tok)}</span>`;
+        const fmtAttr = (p.bold ? ' data-bold="1"' : '') +
+          (p.italic ? ' data-italic="1"' : '') +
+          (p.href ? ` data-href="${escapeAttr(p.href)}"` : '');
+        html += `<span class="byo-word"${colAttr}${fmtAttr}>${escapeHtml(tok)}</span>`;
         wordIdx++;
       }
       if (html === '') html = '<br>';
@@ -654,6 +675,27 @@
       this.editable.dataset.tag = this.tag;
     }
 
+    /* ---------------- inline formatting (per-word, via BYO.Editor) ----------------
+       Bold / italic / link are stored as per-word attributes on the selected
+       spans so the warp raster (computed-style per word) honours them. Each
+       toggles across the WHOLE selection; re-raster if warped. */
+    _fmtSpans() {
+      this.restoreSelection();
+      return this._selection.length ? this._selection : this._allWords();
+    }
+    toggleBold() { if (this.editor) { const on = this.editor.bold(this._fmtSpans()); if (this.isWarped) this._rasterizeIntoWarp(); return on; } }
+    toggleItalic() { if (this.editor) { const on = this.editor.italic(this._fmtSpans()); if (this.isWarped) this._rasterizeIntoWarp(); return on; } }
+    setLink(url) { if (this.editor) { this.editor.link(this._fmtSpans(), url); if (this.isWarped) this._rasterizeIntoWarp(); } }
+    clearLink() { if (this.editor) { this.editor.unlink(this._fmtSpans()); if (this.isWarped) this._rasterizeIntoWarp(); } }
+    removeInlineFormat() { if (this.editor) { this.editor.removeFormat(this._fmtSpans()); if (this.isWarped) this._rasterizeIntoWarp(); } }
+    // current inline-format state of the selection (for the dev-ui buttons)
+    inlineState() {
+      const spans = this._selection.length ? this._selection : [];
+      return this.editor
+        ? { bold: this.editor.isBold(spans), italic: this.editor.isItalic(spans), href: this.editor.linkOf(spans) }
+        : { bold: false, italic: false, href: '' };
+    }
+
     /* =================================================================
        WARP — build a WarpBox over THIS component's rect, feed a HIGH-DPI
        rasterization, hide the flat DOM text while warped.
@@ -746,7 +788,10 @@
         const fontSize = cs.fontSize || '16px';
         const fontFamily = cs.fontFamily || 'sans-serif';
         const fontWeight = cs.fontWeight || '800';
-        ctx.font = `${fontWeight} ${fontSize} ${fontFamily}`;
+        const fontStyle = cs.fontStyle && cs.fontStyle !== 'normal' ? cs.fontStyle + ' ' : '';
+        // include style (italic) + weight (bold) so per-word data-bold/italic
+        // render correctly on the warped cube as well as the flat DOM text.
+        ctx.font = `${fontStyle}${fontWeight} ${fontSize} ${fontFamily}`;
         // NOTE: canvas 2D fillText() does not honour letterSpacing/wordSpacing
         // (those are DOM-only properties), so the warped raster matches the flat
         // text minus any letter/word spacing applied via applyFormat. Known,
@@ -782,6 +827,9 @@
           };
           if (!text.trim()) entry.empty = true;
           if (w.classList.contains('byo-word--filled')) entry.fill = true;
+          if (w.getAttribute('data-bold') === '1') entry.bold = true;
+          if (w.getAttribute('data-italic') === '1') entry.italic = true;
+          if (w.getAttribute('data-href')) entry.href = w.getAttribute('data-href');
           words.push(entry);
         });
         lines.push({ words });
@@ -842,6 +890,9 @@
             if (wd.color) { span.dataset.color = wd.color; span.style.color = wd.color; }
             else span.dataset.color = '';
             if (wd.fill) span.classList.add('byo-word--filled');
+            if (wd.bold) span.setAttribute('data-bold', '1');
+            if (wd.italic) span.setAttribute('data-italic', '1');
+            if (wd.href) span.setAttribute('data-href', wd.href);
             line.appendChild(span);
             if (i < words.length - 1) line.appendChild(document.createTextNode(' '));
           });
@@ -888,6 +939,7 @@
     /* ---------------- teardown ---------------- */
     destroy() {
       this.detachWarp();
+      if (this.editor) this.editor.destroy();
       window.removeEventListener('resize', this._onResize);
       if (this._fillRaf) cancelAnimationFrame(this._fillRaf);
       this._fills.clear();
