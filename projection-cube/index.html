@@ -17,15 +17,16 @@
     .hint {
       position: fixed; left: 14px; bottom: 12px;
       font-size: 12px; letter-spacing: 0.02em; color: #9aa0a6;
-      user-select: none; pointer-events: none;
+      user-select: none; pointer-events: none; max-width: 60vw;
     }
   </style>
 </head>
 <body>
   <canvas id="scene"></canvas>
-  <div class="hint">click anywhere to change the words · text is projected onto an invisible, slowly rocking cube</div>
+  <div class="hint">click empty space to change words · drag the gizmo to move / rotate / scale the cube · keys: <b>W</b> move · <b>E</b> rotate · <b>R</b> scale · <b>space</b> pause</div>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.128.0/examples/js/controls/TransformControls.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
   <script src="word-pairings.js"></script>
   <script>
@@ -36,20 +37,25 @@
        ================================================================ */
     const CONFIG = {
       // --- the invisible cube ---
-      cubeSize:    1.15,   // half-extent of the cube (world units)
-      strength:    1.7,    // how far the text is pushed toward the camera onto the front faces
-      edgeBand:    0.55,   // width of the seam where projected text eases back to flat (world units of chord)
+      cubeSize:      1.15,   // base half-extent of the cube (world units; the gizmo scales on top)
+      strength:      1.7,    // how far the text is pushed onto the cube's front faces
+      edgeBand:      0.55,   // seam width where projected text eases back to flat
 
       // --- motion ---
-      spinSpeed:   0.22,   // continuous turn about the vertical axis (rad/s)
-      tiltAmp:     0.42,   // amplitude of the back-and-forth rocking (rad)
-      tiltSpeed:   0.55,   // rocking speed (rad/s)
-      rollAmp:     0.14,   // gentle secondary wobble about the view axis (rad)
-      rollSpeed:   0.37,
+      paused:        false,  // freeze ALL motion (gizmo still works)
+      spinSpeed:     0.22,   // turn about the vertical axis (rad/s) — 0 = no spin
+      tiltAmp:       0.42,   // amplitude of the back-and-forth rocking (rad)
+      tiltSpeed:     0.55,   // rocking speed (rad/s)
+      rollAmp:       0.14,   // gentle secondary wobble (rad)
+      rollSpeed:     0.37,
 
       // --- text ---
-      fontScale:   0.135,  // line height as a fraction of the text-canvas height
-      autoCycle:   0.0     // seconds between automatic word changes (0 = off, change on click)
+      texResolution: 3072,   // width in px of the rendered text texture (higher = sharper)
+      fontScale:     0.135,  // line height as a fraction of the text-canvas height
+      autoCycle:     0.0,    // seconds between automatic word changes (0 = off)
+
+      // --- helpers ---
+      showGuide:     true    // show the wireframe cube + gizmo
     };
     /* ================================================================ */
 
@@ -70,23 +76,24 @@
     let nounColor = randColor(), verbColor = contrast(nounColor);
 
     // ================================================================
-    //  TEXT TEXTURE  — the three flat title lines, drawn onto a canvas
+    //  TEXT TEXTURE  — three flat title lines on a TRANSPARENT canvas
     // ================================================================
     const texCanvas = document.createElement('canvas');
     const tctx = texCanvas.getContext('2d');
     const texture = new THREE.CanvasTexture(texCanvas);
-    texture.anisotropy = 8;
-    texture.minFilter = THREE.LinearFilter;
+    texture.minFilter = THREE.LinearFilter;      // no mip-maps -> no transparent-edge bleeding
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
 
-    // sized to match the screen aspect so text is never stretched
     function sizeTextCanvas() {
       const aspect = window.innerWidth / window.innerHeight;
-      texCanvas.width  = 2200;
-      texCanvas.height = Math.round(2200 / aspect);
+      texCanvas.width  = Math.round(CONFIG.texResolution);
+      texCanvas.height = Math.round(CONFIG.texResolution / aspect);
     }
 
     function drawText() {
       const W = texCanvas.width, H = texCanvas.height;
+      // fully transparent background — ONLY the glyphs get any alpha
       tctx.clearRect(0, 0, W, H);
 
       const n    = nouns[nounIndex];
@@ -120,6 +127,8 @@
       texture.needsUpdate = true;
     }
 
+    function rebuildTexture() { sizeTextCanvas(); drawText(); }
+
     function cycleNoun() {
       nounIndex = (nounIndex + 1) % nouns.length;
       nounColor = randColor(); verbIndex = 0; verbColor = contrast(nounColor);
@@ -131,6 +140,8 @@
     // ================================================================
     const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('scene'), antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    const MAX_ANISO = renderer.capabilities.getMaxAnisotropy();
+    texture.anisotropy = MAX_ANISO;
 
     const scene  = new THREE.Scene();
     const CAM_FOV = 45, CAM_DIST = 6;
@@ -138,16 +149,24 @@
     camera.position.set(0, 0, CAM_DIST);
     camera.lookAt(0, 0, 0);
 
-    // --- displacement shader -------------------------------------------------
-    // For every vertex of a flat plane we shoot a ray straight along the view
-    // axis (world -Z) and intersect it with the invisible, rotating cube.
-    // Inside the cube's silhouette the vertex is lifted onto the cube's FRONT
-    // surface (orthographic projection -> clean facets). The lift is faded out
-    // across `edgeBand` near the silhouette (where the chord through the cube
-    // shrinks to zero), so projected and un-projected text meet seamlessly.
+    // --- the cube as a transformable object (driven by the gizmo) ---
+    const cube = new THREE.Object3D();      // gizmo target; its world matrix defines the cube
+    scene.add(cube);
+
+    // visible wireframe guide that exactly tracks the invisible cube
+    let guide = null;
+    function buildGuide() {
+      if (guide) { guide.geometry.dispose(); cube.remove(guide); }
+      const g = new THREE.EdgesGeometry(new THREE.BoxGeometry(CONFIG.cubeSize * 2, CONFIG.cubeSize * 2, CONFIG.cubeSize * 2));
+      guide = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0xbfc6cc, transparent: true, opacity: 0.55 }));
+      guide.visible = CONFIG.showGuide;
+      cube.add(guide);
+    }
+
+    // --- displacement shader (now uses the cube's full inverse matrix) ---
     const vertexShader = `
-      uniform mat3  uRotInv;   // inverse of the cube's current rotation
-      uniform vec3  uHalf;     // cube half-extents
+      uniform mat4  uCubeInv;   // inverse of the cube's world matrix (T * R * S)
+      uniform vec3  uHalf;      // cube half-extents (before the gizmo scale)
       uniform float uStrength;
       uniform float uEdgeBand;
       varying vec2  vUv;
@@ -155,12 +174,11 @@
       void main() {
         vec3 wp = (modelMatrix * vec4(position, 1.0)).xyz;
 
-        // World column through this vertex, parameterised by world-Z (= t).
-        // P(t) = (wp.x, wp.y, t);  in cube space: Rinv * P(t).
-        vec3 lo = uRotInv * vec3(wp.x, wp.y, 0.0);   // local origin (t = 0)
-        vec3 ld = uRotInv * vec3(0.0, 0.0, 1.0);     // local direction per unit t
+        // World column through this vertex, parameterised by world-Z (= t):
+        //   P(t) = (wp.x, wp.y, t)  ->  cube space: uCubeInv * P(t)
+        vec3 lo = (uCubeInv * vec4(wp.x, wp.y, 0.0, 1.0)).xyz;  // local origin (t = 0)
+        vec3 ld =  mat3(uCubeInv) * vec3(0.0, 0.0, 1.0);        // local direction per unit t
 
-        // avoid division by zero for axis-aligned moments
         vec3 safe = vec3(
           abs(ld.x) < 1e-5 ? 1e-5 : ld.x,
           abs(ld.y) < 1e-5 ? 1e-5 : ld.y,
@@ -171,14 +189,14 @@
         vec3 t2 = ( uHalf - lo) / safe;
         vec3 tmin = min(t1, t2);
         vec3 tmax = max(t1, t2);
-        float tlo = max(max(tmin.x, tmin.y), tmin.z);   // back surface world-Z
-        float thi = min(min(tmax.x, tmax.y), tmax.z);   // front surface world-Z
+        float tlo = max(max(tmin.x, tmin.y), tmin.z);
+        float thi = min(min(tmax.x, tmax.y), tmax.z);
 
         float z = wp.z;
         if (thi > tlo) {
-          float chord = thi - tlo;                       // cube thickness along the column
+          float chord = thi - tlo;
           float mask  = smoothstep(0.0, uEdgeBand, chord);
-          z = mix(wp.z, thi * uStrength, mask);          // lift onto the front face
+          z = mix(wp.z, thi * uStrength, mask);
         }
 
         vUv = uv;
@@ -191,14 +209,14 @@
       varying vec2 vUv;
       void main() {
         vec4 c = texture2D(uTex, vUv);
-        if (c.a < 0.01) discard;
-        gl_FragColor = c;
+        if (c.a < 0.02) discard;          // transparent everywhere except the glyphs
+        gl_FragColor = vec4(c.rgb, c.a);
       }
     `;
 
     const uniforms = {
       uTex:      { value: texture },
-      uRotInv:   { value: new THREE.Matrix3() },
+      uCubeInv:  { value: new THREE.Matrix4() },
       uHalf:     { value: new THREE.Vector3(CONFIG.cubeSize, CONFIG.cubeSize, CONFIG.cubeSize) },
       uStrength: { value: CONFIG.strength },
       uEdgeBand: { value: CONFIG.edgeBand }
@@ -212,38 +230,87 @@
     let plane = null;
     function buildPlane() {
       if (plane) { plane.geometry.dispose(); scene.remove(plane); }
-      const aspect  = window.innerWidth / window.innerHeight;
+      const aspect = window.innerWidth / window.innerHeight;
       const visH = 2 * CAM_DIST * Math.tan((CAM_FOV * Math.PI / 180) / 2);
       const visW = visH * aspect;
       const W = visW * 1.12, H = visH * 1.12;
       const segX = 240, segY = Math.max(40, Math.round(240 / aspect));
-      const geo = new THREE.PlaneGeometry(W, H, segX, segY);
-      plane = new THREE.Mesh(geo, material);
+      plane = new THREE.Mesh(new THREE.PlaneGeometry(W, H, segX, segY), material);
       scene.add(plane);
     }
 
-    // ---------- cube rotation, rebuilt each frame ----------
-    const rotM4   = new THREE.Matrix4();
-    const rotM4i  = new THREE.Matrix4();
-    const euler   = new THREE.Euler();
-    function updateRotation(time) {
+    // ================================================================
+    //  GIZMO (TransformControls) + motion compositing
+    // ================================================================
+    // The gizmo edits a "rest" transform; procedural motion is layered on top
+    // so the wireframe + shader always agree with the gizmo.
+    const basePos   = new THREE.Vector3(0, 0, 0);
+    const baseQuat  = new THREE.Quaternion();
+    const baseScale = new THREE.Vector3(1, 1, 1);
+
+    let spinPhase = 0, rockTime = 0;
+    let dragging = false;
+
+    const tc = new THREE.TransformControls(camera, renderer.domElement);
+    tc.setSpace('local');
+    tc.attach(cube);
+    scene.add(tc);
+
+    tc.addEventListener('dragging-changed', (e) => {
+      dragging = e.value;
+      if (!dragging) {
+        // bake the gizmo result into the rest transform, restart motion cleanly
+        basePos.copy(cube.position);
+        baseQuat.copy(cube.quaternion);
+        baseScale.copy(cube.scale);
+        spinPhase = 0; rockTime = 0;
+      }
+    });
+
+    // motion compositing scratch
+    const euler = new THREE.Euler();
+    const motionQuat = new THREE.Quaternion();
+
+    function applyMotion(dt) {
+      if (dragging) return;                         // gizmo owns the transform while dragging
+      cube.position.copy(basePos);
+      cube.scale.copy(baseScale);
+      if (CONFIG.paused) {
+        cube.quaternion.copy(baseQuat);
+        return;
+      }
+      spinPhase += CONFIG.spinSpeed * dt;
+      rockTime  += dt;
       euler.set(
-        CONFIG.tiltAmp * Math.sin(time * CONFIG.tiltSpeed),   // rock back & forth (X)
-        time * CONFIG.spinSpeed,                              // continuous spin (Y)
-        CONFIG.rollAmp * Math.sin(time * CONFIG.rollSpeed)    // gentle wobble (Z)
+        CONFIG.tiltAmp * Math.sin(rockTime * CONFIG.tiltSpeed),
+        spinPhase,
+        CONFIG.rollAmp * Math.sin(rockTime * CONFIG.rollSpeed)
       );
-      rotM4.makeRotationFromEuler(euler);
-      rotM4i.copy(rotM4).invert();
-      uniforms.uRotInv.value.setFromMatrix4(rotM4i);
+      motionQuat.setFromEuler(euler);
+      cube.quaternion.multiplyQuaternions(motionQuat, baseQuat);   // motion in world space
     }
 
     // ================================================================
     //  INTERACTION
     // ================================================================
-    window.addEventListener('click', cycleNoun);
-    window.addEventListener('touchstart', e => { e.preventDefault(); cycleNoun(); }, { passive: false });
+    // change words on click — but ignore clicks that were gizmo drags
+    let suppressClick = false;
+    tc.addEventListener('mouseDown', () => { suppressClick = true; });
+    window.addEventListener('click', () => {
+      if (dragging || suppressClick) { suppressClick = false; return; }
+      cycleNoun();
+    });
+    window.addEventListener('touchstart', (e) => {
+      if (dragging) return;
+      // let the gizmo handle touches near it; otherwise cycle
+    }, { passive: true });
 
-    let autoTimer = 0;
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'w' || e.key === 'W') tc.setMode('translate');
+      else if (e.key === 'e' || e.key === 'E') tc.setMode('rotate');
+      else if (e.key === 'r' || e.key === 'R') tc.setMode('scale');
+      else if (e.code === 'Space') { CONFIG.paused = !CONFIG.paused; e.preventDefault(); }
+    });
 
     // ================================================================
     //  RENDER LOOP
@@ -251,18 +318,19 @@
     const clock = new THREE.Clock();
     function animate() {
       requestAnimationFrame(animate);
-      const dt = clock.getDelta();
-      const t  = clock.elapsedTime;
+      const dt = Math.min(clock.getDelta(), 0.05);
 
-      if (CONFIG.autoCycle > 0) {
-        autoTimer += dt;
-        if (autoTimer >= CONFIG.autoCycle) { autoTimer = 0; cycleNoun(); }
+      if (CONFIG.autoCycle > 0 && !CONFIG.paused) {
+        animate._t = (animate._t || 0) + dt;
+        if (animate._t >= CONFIG.autoCycle) { animate._t = 0; cycleNoun(); }
       }
 
-      updateRotation(t);
+      applyMotion(dt);
+      cube.updateMatrixWorld();
+      uniforms.uCubeInv.value.copy(cube.matrixWorld).invert();
+      uniforms.uHalf.value.set(CONFIG.cubeSize, CONFIG.cubeSize, CONFIG.cubeSize);
       uniforms.uStrength.value = CONFIG.strength;
       uniforms.uEdgeBand.value = CONFIG.edgeBand;
-      uniforms.uHalf.value.set(CONFIG.cubeSize, CONFIG.cubeSize, CONFIG.cubeSize);
 
       renderer.render(scene, camera);
     }
@@ -275,26 +343,34 @@
       renderer.setSize(w, h, false);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
-      sizeTextCanvas();
-      drawText();
+      rebuildTexture();
       buildPlane();
     }
     window.addEventListener('resize', resize);
+
+    // ---- init ----
+    buildGuide();
+    rebuildTexture();
+    buildPlane();
     resize();
     animate();
 
     // ================================================================
     //  GUI
     // ================================================================
-    const gui = new dat.GUI({ width: 300 });
+    const gui = new dat.GUI({ width: 310 });
 
     const fCube = gui.addFolder('Invisible cube');
-    fCube.add(CONFIG, 'cubeSize', 0.4, 2.4, 0.01).name('size');
+    fCube.add(CONFIG, 'cubeSize', 0.4, 2.4, 0.01).name('size').onChange(buildGuide);
     fCube.add(CONFIG, 'strength', 0.5, 3.5, 0.01).name('projection depth');
     fCube.add(CONFIG, 'edgeBand', 0.05, 1.5, 0.01).name('seam softness');
+    fCube.add(CONFIG, 'showGuide').name('show guide + gizmo').onChange(v => {
+      guide.visible = v; tc.enabled = v; tc.visible = v;
+    });
     fCube.open();
 
     const fMotion = gui.addFolder('Motion');
+    fMotion.add(CONFIG, 'paused').name('pause (freeze)').listen();
     fMotion.add(CONFIG, 'spinSpeed', 0, 1.2, 0.01).name('spin speed');
     fMotion.add(CONFIG, 'tiltAmp', 0, 1.2, 0.01).name('rock amount');
     fMotion.add(CONFIG, 'tiltSpeed', 0, 1.5, 0.01).name('rock speed');
@@ -302,7 +378,24 @@
     fMotion.add(CONFIG, 'rollSpeed', 0, 1.5, 0.01).name('wobble speed');
     fMotion.open();
 
+    const fGizmo = gui.addFolder('Gizmo mode');
+    const gizmoActions = {
+      move:  () => tc.setMode('translate'),
+      rotate:() => tc.setMode('rotate'),
+      scale: () => tc.setMode('scale'),
+      reset: () => {
+        basePos.set(0, 0, 0); baseQuat.identity(); baseScale.set(1, 1, 1);
+        spinPhase = 0; rockTime = 0;
+        cube.position.set(0, 0, 0); cube.quaternion.identity(); cube.scale.set(1, 1, 1);
+      }
+    };
+    fGizmo.add(gizmoActions, 'move').name('move (W)');
+    fGizmo.add(gizmoActions, 'rotate').name('rotate (E)');
+    fGizmo.add(gizmoActions, 'scale').name('scale (R)');
+    fGizmo.add(gizmoActions, 'reset').name('reset transform');
+
     const fText = gui.addFolder('Text');
+    fText.add(CONFIG, 'texResolution', 1024, 8192, 256).name('texture res (px)').onChange(rebuildTexture);
     fText.add(CONFIG, 'fontScale', 0.06, 0.26, 0.005).name('font size').onChange(drawText);
     fText.add(CONFIG, 'autoCycle', 0, 6, 0.5).name('auto-change (s)');
     fText.open();
