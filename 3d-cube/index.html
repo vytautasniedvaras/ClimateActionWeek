@@ -23,7 +23,7 @@
 </head>
 <body>
   <canvas id="scene"></canvas>
-  <div class="hint">move horizontally over a line to change its words · move between lines to roll the cube</div>
+  <div class="hint">move horizontally over a line to change its words · move between lines to turn the cube</div>
 
   <!-- three.js (UMD build, exposes global THREE — works over file://) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -46,68 +46,78 @@
     let nounIndex = 0, verbIndex = 0;
     let nounColor = randColor(), verbColor = contrast(nounColor);
 
-    // ---------- cube dimensions ----------
-    const CUBE_W = 5.2;
-    const CUBE_H = 3.8;
-    const SLICE  = CUBE_H / 3;          // height of one slice
-    const CUBE_D = SLICE;               // depth = slice height → square cross-section so text wraps evenly
-    const R      = SLICE / 2;           // distance of each wrapped face from the slice's roll axis
+    // ---------- cube dimensions (square column → 4 vertical faces) ----------
+    const L      = 4.0;                 // cube width & depth
+    const CUBE_H = 3.8;                 // cube height
+    const SLICE  = CUBE_H / 3;          // height of one horizontal slice
     const positions = [SLICE, 0, -SLICE];
 
-    // ---------- text-on-canvas (one texture per line, shown on all 4 wrapped faces) ----------
-    const PLANE_W = 4.6, PLANE_H = SLICE;
-    const CW = 2048, CH = Math.round(CW * PLANE_H / PLANE_W);
-    function makeLayer() {
-      const canvas = document.createElement('canvas');
-      canvas.width = CW; canvas.height = CH;
-      const ctx = canvas.getContext('2d');
-      const tex = new THREE.CanvasTexture(canvas);
-      tex.anisotropy = 8;
-      tex.minFilter = THREE.LinearFilter;
-      return { canvas, ctx, tex };
-    }
-    const layers = [makeLayer(), makeLayer(), makeLayer()];
-    const measureCtx = layers[0].ctx;
-    const fontOf = s => `800 ${s}px Inter, Arial, sans-serif`;
-    const widthOf = (segs, size) => {
-      measureCtx.font = fontOf(size);
-      return segs.reduce((w, s) => w + measureCtx.measureText(s.text).width, 0);
-    };
+    // ---------- text canvases ----------
+    // Each line is drawn at a FIXED size onto a full "perimeter" canvas (4 faces wide).
+    // Short text sits on the front face; long text spills onto the side/back faces (wraps around).
+    const WF = 1024;                                  // per-face canvas width (px)
+    const HF = Math.round(WF * SLICE / L);            // per-face canvas height (keeps face aspect)
+    const WM = WF * 4;                                // perimeter master width
+    const FONT_PX = Math.round(HF * 0.58);            // one fixed font size for every line
+    const fontStr = `800 ${FONT_PX}px Inter, Arial, sans-serif`;
 
-    function drawLine(layer, segs, size) {
-      const { ctx, tex } = layer;
-      ctx.clearRect(0, 0, CW, CH);
-      ctx.font = fontOf(size);
-      ctx.textBaseline = 'middle';
-      ctx.textAlign = 'left';
-      const total = segs.reduce((w, s) => w + ctx.measureText(s.text).width, 0);
-      let x = (CW - total) / 2;
-      for (const seg of segs) {
-        ctx.fillStyle = seg.color;
-        ctx.fillText(seg.text, x, CH / 2 + 4);
-        x += ctx.measureText(seg.text).width;
+    // master (offscreen) + 4 face canvases per line
+    function makeLine() {
+      const master = document.createElement('canvas');
+      master.width = WM; master.height = HF;
+      const mctx = master.getContext('2d');
+      const faces = [];
+      for (let k = 0; k < 4; k++) {
+        const c = document.createElement('canvas');
+        c.width = WF; c.height = HF;
+        const tex = new THREE.CanvasTexture(c);
+        tex.anisotropy = 8; tex.minFilter = THREE.LinearFilter;
+        faces.push({ canvas: c, ctx: c.getContext('2d'), tex });
       }
-      tex.needsUpdate = true;
+      return { master, mctx, faces };
+    }
+    const lineTex = [makeLine(), makeLine(), makeLine()];
+
+    // contiguous source windows around the column: left, front, right, back  (wraps at WM)
+    // face order used below is [front, right, back, left]; their source starts:
+    const SRC_START = { front: 1.5 * WF, right: 2.5 * WF, back: 3.5 * WF, left: 0.5 * WF };
+
+    function drawLine(idx, segs) {
+      const L0 = lineTex[idx];
+      const { mctx } = L0;
+      mctx.clearRect(0, 0, WM, HF);
+      mctx.font = fontStr;
+      mctx.textBaseline = 'middle';
+      mctx.textAlign = 'left';
+      const total = segs.reduce((w, s) => w + mctx.measureText(s.text).width, 0);
+      let x = (WM - total) / 2;                       // centre the text on the perimeter
+      for (const seg of segs) {
+        mctx.fillStyle = seg.color;
+        mctx.fillText(seg.text, x, HF / 2 + 3);
+        x += mctx.measureText(seg.text).width;
+      }
+      // crop each quarter onto its face (with wrap-around at the seam)
+      const order = ['front', 'right', 'back', 'left'];
+      order.forEach((name, k) => {
+        const f = L0.faces[k];
+        f.ctx.clearRect(0, 0, WF, HF);
+        let start = SRC_START[name];
+        const first = Math.min(WF, WM - start);
+        f.ctx.drawImage(L0.master, start, 0, first, HF, 0, 0, first, HF);
+        if (first < WF) {                              // wrapped past the master's right edge
+          f.ctx.drawImage(L0.master, 0, 0, WF - first, HF, first, 0, WF - first, HF);
+        }
+        f.tex.needsUpdate = true;
+      });
     }
 
-    // recompute one shared font size that fits the widest of the 3 lines, then draw all 3
     function relayout() {
       const n = nouns[nounIndex];
       const verb = n.verbs[verbIndex % n.verbs.length].toUpperCase();
-      const lines = [
-        [{ text: 'BYO', color: '#000' }, { text: n.word, color: nounColor }],
-        [{ text: 'HOW CAN ', color: '#000' }, { text: n.plural, color: nounColor }],
-        [{ text: verb + ' ', color: verbColor }, { text: 'SCIENCE', color: '#000' }]
-      ];
-      const BASE = 300, maxW = CW * 0.94;
-      let size = BASE;
-      for (const segs of lines) {
-        const w = widthOf(segs, BASE);
-        if (w > maxW) size = Math.min(size, BASE * maxW / w);
-      }
-      lines.forEach((segs, i) => drawLine(layers[i], segs, size));
+      drawLine(0, [{ text: 'BYO ', color: '#000' }, { text: n.word, color: nounColor }]);
+      drawLine(1, [{ text: 'HOW CAN ', color: '#000' }, { text: n.plural, color: nounColor }]);
+      drawLine(2, [{ text: verb + ' ', color: verbColor }, { text: 'SCIENCE', color: '#000' }]);
     }
-
     function cycleNoun() {
       nounIndex = (nounIndex + 1) % nouns.length;
       nounColor = randColor(); verbIndex = 0; verbColor = contrast(nounColor);
@@ -124,52 +134,51 @@
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
-    camera.position.set(0, 0, 7);
+    camera.position.set(0, 0, 8);
     camera.lookAt(0, 0, 0);
 
     const group = new THREE.Group();
     scene.add(group);
 
     // transparent glass cube + edges + slice dividers
-    const boxGeo = new THREE.BoxGeometry(CUBE_W, CUBE_H, CUBE_D);
+    const boxGeo = new THREE.BoxGeometry(L, CUBE_H, L);
     group.add(new THREE.Mesh(boxGeo, new THREE.MeshBasicMaterial({
       color: 0x6fa8d8, transparent: true, opacity: 0.05, side: THREE.DoubleSide, depthWrite: false
     })));
     group.add(new THREE.LineSegments(new THREE.EdgesGeometry(boxGeo),
       new THREE.LineBasicMaterial({ color: 0xbfc6cc, transparent: true, opacity: 0.6 })));
     function divider(y) {
-      const hw = CUBE_W / 2, hd = CUBE_D / 2;
+      const hw = L / 2;
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
-        -hw, y, -hd,  hw, y, -hd,  hw, y, hd,  -hw, y, hd,  -hw, y, -hd
+        -hw, y, -hw,  hw, y, -hw,  hw, y, hw,  -hw, y, hw,  -hw, y, -hw
       ]), 3));
       return new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0xd5dade, transparent: true, opacity: 0.5 }));
     }
     group.add(divider(CUBE_H / 6));
     group.add(divider(-CUBE_H / 6));
 
-    // each slice = a Group of 4 faces wrapped around the roll (X) axis.
-    // a face becomes upright & camera-facing when the slice's rotation.x reaches its `front` angle.
+    // each slice = 4 vertical faces around the Y axis; rolling about Y wraps text around them.
     const HALF = Math.PI / 2;
     const faceDefs = [
-      { pos: [0, 0,  R], rotX: 0 },        // front  → upright at θ = 0
-      { pos: [0,  R, 0], rotX: -HALF },    // top    → upright at θ = +90°
-      { pos: [0, 0, -R], rotX: Math.PI },  // back   → upright at θ = 180°
-      { pos: [0, -R, 0], rotX:  HALF }     // bottom → upright at θ = +270°
+      { pos: [0, 0,  L / 2], rotY: 0 },        // front
+      { pos: [ L / 2, 0, 0], rotY:  HALF },    // right
+      { pos: [0, 0, -L / 2], rotY: Math.PI },  // back
+      { pos: [-L / 2, 0, 0], rotY: -HALF }     // left
     ];
-    const planeGeo = new THREE.PlaneGeometry(PLANE_W, PLANE_H);
+    const planeGeo = new THREE.PlaneGeometry(L, SLICE);
     const slices = [];
-    const spinSpeed = [0.013, -0.017, 0.02];
+    const spinSpeed = [0.012, -0.016, 0.02];
     for (let i = 0; i < 3; i++) {
       const sliceGroup = new THREE.Group();
       sliceGroup.position.y = positions[i];
-      for (const f of faceDefs) {
-        const mat = new THREE.MeshBasicMaterial({ map: layers[i].tex, transparent: true, side: THREE.FrontSide, depthWrite: false });
+      faceDefs.forEach((f, k) => {
+        const mat = new THREE.MeshBasicMaterial({ map: lineTex[i].faces[k].tex, transparent: true, side: THREE.FrontSide, depthWrite: false });
         const mesh = new THREE.Mesh(planeGeo, mat);
         mesh.position.set(f.pos[0], f.pos[1], f.pos[2]);
-        mesh.rotation.x = f.rotX;
+        mesh.rotation.y = f.rotY;
         sliceGroup.add(mesh);
-      }
+      });
       group.add(sliceGroup);
       slices.push(sliceGroup);
     }
@@ -201,10 +210,10 @@
       for (let i = 0; i < 3; i++) {
         const s = slices[i];
         if (i === activeLine) {
-          const target = Math.round(s.rotation.x / TWO_PI) * TWO_PI;  // nearest flat (front face upright)
-          s.rotation.x += (target - s.rotation.x) * 0.12;
+          const target = Math.round(s.rotation.y / TWO_PI) * TWO_PI;  // ease to front face, centred
+          s.rotation.y += (target - s.rotation.y) * 0.12;
         } else {
-          s.rotation.x += spinSpeed[i];   // roll → text wraps around the other faces
+          s.rotation.y += spinSpeed[i];   // turn about Y → text wraps around the faces
         }
       }
       renderer.render(scene, camera);
@@ -215,7 +224,7 @@
       const w = window.innerWidth, h = window.innerHeight;
       renderer.setSize(w, h, false);
       camera.aspect = w / h;
-      camera.position.z = w / h < 1 ? 9.5 : 7;
+      camera.position.z = w / h < 1 ? 11 : 8;
       camera.updateProjectionMatrix();
     }
     window.addEventListener('resize', resize);
