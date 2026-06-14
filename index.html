@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Bring Your Own Animation</title>
+  <style>
+    :root {
+      --text-color: #000000;
+      --max-width: 1200px;
+      --padding: 16px;
+    }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: #ffffff;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      color: var(--text-color);
+      overflow: hidden;
+    }
+
+    .wrap {
+      max-width: var(--max-width);
+      padding: var(--padding);
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      justify-content: center;
+      min-height: 100vh;
+      box-sizing: border-box;
+      text-align: left;
+      gap: 0.05em;
+    }
+
+    .title-container {
+      display: flex;
+      flex-wrap: nowrap;
+      justify-content: flex-start;
+      align-items: center;
+      font-size: 6.5vw;
+      line-height: 0.95;
+      letter-spacing: -0.02em;
+      font-weight: 800;
+      text-transform: uppercase;
+      user-select: none;
+      width: 100%;
+      cursor: pointer;
+      transition: opacity 0.12s linear;
+    }
+
+    .second-line,
+    .third-line {
+      gap: 0.22em;
+    }
+
+    .static-text {
+      color: var(--text-color);
+      white-space: nowrap;
+    }
+
+    .stack {
+      position: relative;
+      height: 1.1em;
+      display: inline-block;
+      text-align: left;
+      margin-left: 0;
+    }
+
+    .word {
+      margin: 0;
+      padding: 0;
+      color: var(--text-color);
+      position: absolute;
+      top: 50%;
+      left: 0;
+      transform: translateY(-50%);
+      opacity: 0;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+
+    .word.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .mirror-word,
+    .verb-word {
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap" aria-labelledby="title-description">
+
+    <!-- Line 1: BYO [rotating noun] -->
+    <div class="title-container">
+      <span id="title-description" class="static-text">BYO</span>
+      <!-- Words injected from word-pairings.js -->
+      <div class="stack" id="stack1"></div>
+    </div>
+
+    <!-- Line 2: How can [mirrored plural noun] -->
+    <div class="title-container second-line">
+      <span class="static-text">How can</span>
+      <span class="mirror-word" id="mirror-word">BEAMERS</span>
+    </div>
+
+    <!-- Line 3: [rotating verb] CLIMATE SCIENCE -->
+    <div class="title-container third-line">
+      <span class="verb-word" id="verb-word">facilitate</span>
+      <span class="static-text">Science</span>
+    </div>
+
+  </main>
+
+  <script src="word-pairings.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const data = window.WORD_DATA;
+      const nouns = data.nouns;
+
+      const stackElement = document.getElementById('stack1');
+      const mirrorWord = document.getElementById('mirror-word');
+      const verbWord = document.getElementById('verb-word');
+
+      // Build the noun stack from the data file
+      nouns.forEach((n, i) => {
+        const span = document.createElement('span');
+        span.className = 'word' + (i === 0 ? ' active' : '');
+        span.textContent = n.word;
+        stackElement.appendChild(span);
+      });
+      const wordElements = stackElement.querySelectorAll('.word');
+
+      const defaultWordIndex = 0;
+      let activeWordIndex = defaultWordIndex;
+      let verbIndex = 0;
+      let currentWordColor = '';
+
+      let lastMouseXTop = 0, lastMouseXBottom = 0;
+      let lastTouchXTop = 0, lastTouchXBottom = 0;
+      let lastMouseY = 0, lastTouchY = 0;
+      const movementThreshold = 45;
+
+      // True only when motion is predominantly horizontal (ignore vertical drift)
+      function isHorizontal(dx, dy) {
+        return Math.abs(dx) > movementThreshold && Math.abs(dx) > Math.abs(dy);
+      }
+
+      const sdgColors = [
+        '#E5233D', '#DDA73A', '#4CA146', '#C5192D', '#EF402C', '#27BFE6',
+        '#FBC412', '#A31C44', '#F26A2D', '#E01483', '#F89D2A', '#BF8D2C',
+        '#407F46', '#1F97D4', '#59BA48', '#126A9F', '#13496B'
+      ];
+
+      function getContrastingColor(excludeColor) {
+        const available = sdgColors.filter(c => c !== excludeColor);
+        return available[Math.floor(Math.random() * available.length)];
+      }
+
+      // Show the plural noun + a verb that belongs to that noun
+      function applyNoun(index, color) {
+        const noun = nouns[index];
+        verbIndex = 0;
+        mirrorWord.textContent = noun.plural;
+        mirrorWord.style.color = color;
+        verbWord.textContent = noun.verbs[0];
+        verbWord.style.color = getContrastingColor(color);
+      }
+
+      // Initialise
+      const initColor = sdgColors[Math.floor(Math.random() * sdgColors.length)];
+      currentWordColor = initColor;
+      wordElements[defaultWordIndex].style.color = initColor;
+      applyNoun(defaultWordIndex, initColor);
+
+      function updateStackWidth() {
+        stackElement.style.width = `${wordElements[activeWordIndex].offsetWidth}px`;
+      }
+
+      // Line 1: cycles the noun (syncs mirror + resets verb to one that fits)
+      function cycleNoun() {
+        wordElements[activeWordIndex].style.color = '';
+        wordElements[activeWordIndex].classList.remove('active');
+
+        activeWordIndex = (activeWordIndex + 1) % wordElements.length;
+
+        const wordColor = sdgColors[Math.floor(Math.random() * sdgColors.length)];
+        currentWordColor = wordColor;
+        const newWord = wordElements[activeWordIndex];
+        newWord.style.color = wordColor;
+        newWord.classList.add('active');
+        updateStackWidth();
+
+        applyNoun(activeWordIndex, wordColor);
+      }
+
+      // Line 2/3: cycles the verb within the active noun's compatible verbs
+      function cycleVerb() {
+        const verbList = nouns[activeWordIndex].verbs;
+        verbIndex = (verbIndex + 1) % verbList.length;
+        verbWord.textContent = verbList[verbIndex];
+        verbWord.style.color = getContrastingColor(currentWordColor);
+      }
+
+      updateStackWidth();
+      window.addEventListener('resize', updateStackWidth);
+
+      const line1 = document.querySelector('.title-container');
+      const line2 = document.querySelector('.second-line');
+      const line3 = document.querySelector('.third-line');
+      const topGroup = [line1];             // BYO [noun]
+      const bottomGroup = [line2, line3];   // HOW CAN [noun]s / [verb] SCIENCE
+
+      // Top zone = everything above the bottom of line 1.
+      function isInTopZone(y) {
+        return y < line1.getBoundingClientRect().bottom;
+      }
+
+      // Only the hovered zone is visible; the other is fully invisible.
+      function setOpacity(group, value) {
+        group.forEach(el => el.style.opacity = value);
+      }
+
+      function updateFade(y) {
+        if (y < line1.getBoundingClientRect().bottom) {
+          // Top zone → show only the first line
+          setOpacity(topGroup, 1);
+          setOpacity(bottomGroup, 0);
+        } else {
+          // Bottom zone → show everything
+          setOpacity(topGroup, 1);
+          setOpacity(bottomGroup, 1);
+        }
+      }
+
+      function clearFade() {
+        setOpacity(topGroup, 1);
+        setOpacity(bottomGroup, 1);
+      }
+
+      document.addEventListener('mousemove', (e) => {
+        const top = isInTopZone(e.clientY);
+        updateFade(e.clientY);
+        const dy = e.clientY - lastMouseY;
+        if (top) {
+          if (isHorizontal(e.clientX - lastMouseXTop, dy)) {
+            cycleNoun();
+            lastMouseXTop = e.clientX;
+          }
+        } else {
+          if (isHorizontal(e.clientX - lastMouseXBottom, dy)) {
+            cycleVerb();
+            lastMouseXBottom = e.clientX;
+          }
+        }
+        lastMouseY = e.clientY;
+      });
+
+      document.addEventListener('mouseleave', clearFade);
+
+      document.addEventListener('touchmove', (e) => {
+        e.preventDefault();
+        const touch = e.touches[0];
+        const top = isInTopZone(touch.clientY);
+        updateFade(touch.clientY);
+        const dy = touch.clientY - lastTouchY;
+        if (top) {
+          if (isHorizontal(touch.clientX - lastTouchXTop, dy)) {
+            cycleNoun();
+            lastTouchXTop = touch.clientX;
+          }
+        } else {
+          if (isHorizontal(touch.clientX - lastTouchXBottom, dy)) {
+            cycleVerb();
+            lastTouchXBottom = touch.clientX;
+          }
+        }
+        lastTouchY = touch.clientY;
+      }, { passive: false });
+
+      document.addEventListener('touchend', clearFade);
+    });
+  </script>
+</body>
+</html>
