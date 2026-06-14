@@ -24,6 +24,18 @@
   };
 
   function init() {
+    /* ---- page container: the mount for all components. Its WIDTH is the
+       breakpoint frame (desktop = full width; mobile = a narrow centred column),
+       so switching breakpoint actually reflows + shows the mobile layout. ---- */
+    const pageStyle = document.createElement('style');
+    pageStyle.textContent =
+      '.byo-page{position:relative;margin:0 auto;width:100%;min-height:100vh;}' +
+      '.byo-page--mobile{width:414px;box-shadow:0 0 0 1px #e2e2e2;background:#fff;}';
+    document.head.appendChild(pageStyle);
+    const page = document.createElement('div');
+    page.className = 'byo-page';
+    document.body.appendChild(page);
+
     /* ---- sampling media (offscreen until the Texture panel mounts it) ----
        Created here, owned here, but DISPLAYED inside the Texture dev panel
        (BYO.TextureWindow moves the element into its viewer). Kept out of the
@@ -51,7 +63,7 @@
     /* ---- one or two text components on the blank page ----
        Two components prove "active follows the last-interacted component". */
     const a = BYO.TextComponent.create({
-      mount: document.body,
+      mount: page,
       state: {
         pos: { anchor: 'tl', xPct: 6, yPct: 10, widthPct: 60 }, z: 0, tag: 'header',
         lines: [{ words: [
@@ -64,7 +76,7 @@
     });
 
     const b = BYO.TextComponent.create({
-      mount: document.body,
+      mount: page,
       state: {
         pos: { anchor: 'tl', xPct: 6, yPct: 42, widthPct: 50 }, z: 0, tag: 'paragraph',
         lines: [{ words: [
@@ -138,10 +150,12 @@
       else if (e.key === 'p' || e.key === 'P') { e.preventDefault(); setPreview(!state.preview); }
     });
 
-    /* ---- breakpoint switching: apply to EVERY box at once ---- */
+    /* ---- breakpoint switching: resize the page frame, then apply to EVERY box
+       (the width change must land BEFORE each box re-applies its px layout). ---- */
     function setBreakpoint(bp) {
       state.breakpoint = bp === 'mobile' ? 'mobile' : 'desktop';
-      components.forEach(function (c) { c.setBreakpoint(state.breakpoint); });
+      page.classList.toggle('byo-page--mobile', state.breakpoint === 'mobile');
+      components.forEach(function (c) { c.setBreakpoint(state.breakpoint); c._applyLayout(); });
       recomputeLayout();
       bpBtn.textContent = 'Breakpoint: ' + state.breakpoint;
     }
@@ -173,7 +187,7 @@
       state.breakpoint = doc.breakpoint === 'mobile' ? 'mobile' : 'desktop';
       state.recentColors = Array.isArray(doc.recentColors) ? doc.recentColors : [];
       doc.components.forEach(function (cs) {
-        const c = BYO.TextComponent.create({ mount: document.body });
+        const c = BYO.TextComponent.create({ mount: page });
         c.deserializeAll(cs);
         if (c.breakpoint !== state.breakpoint) c.setBreakpoint(state.breakpoint);
         components.push(c);

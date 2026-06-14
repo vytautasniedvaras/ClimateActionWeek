@@ -27,6 +27,9 @@
   window.BYO = window.BYO || {};
 
   const SS = 2;            // warp raster supersample (rect * dpr * SS) — kills pixelation
+  // the warp overlay extends this fraction of the box beyond each edge so the
+  // displaced cube AND the transform gizmo aren't clipped at the box bounds.
+  const WARP_OVERSCAN = 0.9;
   let _seq = 0;            // unique id per component (for scoped styles / ids)
   let _stylesInjected = false;
 
@@ -113,9 +116,10 @@
 .byo-textcomp__chrome--dragging .byo-textcomp__readout { display: block; }
 .byo-textcomp.byo-textcomp--warped .byo-word { visibility: hidden; }
 .byo-textcomp__warphost {
-  position: fixed;
+  position: absolute;     /* document coords -> scrolls WITH the text box (not fixed) */
   z-index: 40;
   pointer-events: none;   /* gizmo binds window listeners; overlay never eats clicks */
+  overflow: visible;
 }
 `;
     const el = document.createElement('style');
@@ -348,6 +352,7 @@
 
       // resize: reposition warp overlay + re-rasterize (fixes shader-resize bug)
       this._onResize = () => {
+        this._applyLayout();   // px layout depends on mount width / viewport height
         if (this.isWarped) {
           this._positionWarpHost();
           if (this.warp && this.warp.resize) this.warp.resize();
@@ -371,7 +376,9 @@
         this.activate();
         this.dock = null;
         if (kind.length === 2) this.pos.anchor = kind;   // grabbed corner is the anchor
-        const vW = Math.max(1, window.innerWidth), vH = Math.max(1, window.innerHeight);
+        // x/width are % of the mount (page container) width; y is % of viewport
+        const vW = Math.max(1, this.mount.getBoundingClientRect().width || window.innerWidth);
+        const vH = Math.max(1, window.innerHeight);
         const s0 = { x: e.clientX, y: e.clientY, xPct: this.pos.xPct, yPct: this.pos.yPct, wPct: this.pos.widthPct };
         this._chrome.classList.add('byo-textcomp__chrome--dragging');
         const onMove = (ev) => {
@@ -424,14 +431,20 @@
       if (TextComponent._onGeometryChange) TextComponent._onGeometryChange(this);
     }
 
-    /* ---------------- layout (free 2D corner-anchor, % of viewport) ---------------- */
+    /* ---------------- layout (free 2D corner-anchor) ----------------
+       Positioned in px relative to the MOUNT (the page container): x/width are
+       % of the mount width, y is % of viewport height. Computing px (not CSS %)
+       lets a narrower mount (mobile breakpoint frame) reflow the boxes so the
+       mobile layout is actually visible. */
     _applyLayout() {
       const s = this.el.style;
+      const mw = Math.max(1, this.mount.getBoundingClientRect().width || window.innerWidth);
+      const vh = Math.max(1, window.innerHeight);
       s.position = 'absolute';
       s.margin = '0';
-      s.left = this.pos.xPct + '%';
-      s.top = this.pos.yPct + '%';
-      s.width = this.pos.widthPct + '%';
+      s.left = (this.pos.xPct / 100 * mw) + 'px';
+      s.top = (this.pos.yPct / 100 * vh) + 'px';
+      s.width = (this.pos.widthPct / 100 * mw) + 'px';
       s.zIndex = String(this.z || 0);
       this._updateMarginViz();
     }
@@ -473,9 +486,10 @@
     // resolve a dock against a reference component's screen rect (called by app)
     applyDockFrom(refRect) {
       if (!this.dock || !refRect) return;
-      const vW = Math.max(1, window.innerWidth), vH = Math.max(1, window.innerHeight);
+      const mr = this.mount.getBoundingClientRect();
+      const vW = Math.max(1, mr.width || window.innerWidth), vH = Math.max(1, window.innerHeight);
       const gap = (this.dock.gapPct || 0);
-      const refXPct = (refRect.left / vW) * 100, refYPct = (refRect.top / vH) * 100;
+      const refXPct = ((refRect.left - mr.left) / vW) * 100, refYPct = ((refRect.top - mr.top) / vH) * 100;
       const refWPct = (refRect.width / vW) * 100, refHPct = (refRect.height / vH) * 100;
       const side = this.dock.side;
       if (side === 'right') { this.pos.xPct = refXPct + refWPct + gap; this.pos.yPct = refYPct; }
@@ -956,17 +970,24 @@
       this.isWarped = false;
     }
 
-    // size + position the fixed overlay host EXACTLY over the component rect
+    // overscan margin (CSS px) added around the box so the displaced cube +
+    // gizmo have room and aren't clipped at the box edges.
+    _warpMargin(r) {
+      return { mx: Math.round(r.width * WARP_OVERSCAN), my: Math.round(r.height * WARP_OVERSCAN) };
+    }
+
+    // size + position the overlay host over the component rect PLUS the overscan
+    // margin, in DOCUMENT coords (position:absolute) so it scrolls with the box.
     _positionWarpHost() {
       if (!this._warpHost) return;
       const r = this.el.getBoundingClientRect();
-      // round to whole CSS px so the overlay aligns pixel-perfect with the flat
-      // component (getBoundingClientRect returns floats -> 0.5-1px drift otherwise)
+      const m = this._warpMargin(r);
+      const sx = window.pageXOffset || 0, sy = window.pageYOffset || 0;
       Object.assign(this._warpHost.style, {
-        left: Math.round(r.left) + 'px',
-        top: Math.round(r.top) + 'px',
-        width: Math.max(1, Math.round(r.width)) + 'px',
-        height: Math.max(1, Math.round(r.height)) + 'px',
+        left: Math.round(r.left + sx - m.mx) + 'px',
+        top: Math.round(r.top + sy - m.my) + 'px',
+        width: Math.max(1, Math.round(r.width + 2 * m.mx)) + 'px',
+        height: Math.max(1, Math.round(r.height + 2 * m.my)) + 'px',
         // mirror the component's z so warped boxes layer in the same order
         zIndex: String(40 + (this.z || 0))
       });
@@ -979,10 +1000,11 @@
     _rasterizeIntoWarp() {
       if (!this.warp) return;
       const r = this.el.getBoundingClientRect();
+      const m = this._warpMargin(r);   // canvas matches the OVERSCANNED host
       const dpr = window.devicePixelRatio || 1;
       const scale = dpr * SS;
-      const W = Math.max(1, Math.round(r.width * scale));
-      const H = Math.max(1, Math.round(r.height * scale));
+      const W = Math.max(1, Math.round((r.width + 2 * m.mx) * scale));
+      const H = Math.max(1, Math.round((r.height + 2 * m.my) * scale));
 
       let cv = this._warpCanvas;
       const fresh = !cv || cv.width !== W || cv.height !== H;
@@ -1022,10 +1044,12 @@
         // exact hex (no rgb round-trip loss) when set; else normalized computed
         const col = w.dataset.color || cssColorToHex(cs.color);
         ctx.fillStyle = col;
-        const x = wr.left - compRect.left;
+        // offset by the overscan margin so the text sits in the box region at
+        // the CENTRE of the (larger) canvas — aligned with the flat box.
+        const x = (wr.left - compRect.left) + m.mx;
         // approximate baseline: top + ascent (~0.8 of font-size)
         const fs = parseFloat(fontSize) || 16;
-        const y = (wr.top - compRect.top) + fs * 0.8;
+        const y = (wr.top - compRect.top) + m.my + fs * 0.8;
         ctx.fillText(t, x, y);
       });
 
