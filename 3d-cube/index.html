@@ -23,47 +23,42 @@
 </head>
 <body>
   <canvas id="scene"></canvas>
-  <div class="hint">move horizontally over a line to change its words · move between lines to turn the cube</div>
+  <div class="hint">move horizontally over a line to change its words · move between lines to turn the slabs</div>
 
-  <!-- three.js (UMD build, exposes global THREE — works over file://) -->
+  <!-- three.js + dat.GUI (UMD builds, expose globals — work over file://) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
   <script src="word-pairings.js"></script>
   <script>
   (function () {
 
     /* ================================================================
-       CONFIG — tweak everything here
+       CONFIG — also editable live via the GUI panel (top-right)
        ================================================================ */
     const CONFIG = {
-      // --- cube geometry (world units) ---
-      cubeWidth:  4.4,     // also the cube depth (square column)
-      cubeHeight: 3.9,     // total height (split into 3 slices)
+      // geometry
+      cubeWidth:  4.4,     // cube width & depth (square column)
+      cubeHeight: 3.9,     // total height of the 3 stacked slabs
+      lineSpacing: 0.0,    // extra vertical gap between slabs (world units)
 
-      // --- text ---
-      fontScale:       0.82,   // font size as a fraction of a slice's height (bigger = larger text)
+      // text
+      fontScale:       0.82,   // font size as a fraction of a slab's height
       letterSpacingEm: -0.05,  // negative = tighter letters
-      faceResolution:  1024,   // per-face canvas width in px (texture sharpness)
-      textPadding:     0.96,   // fraction of a face used before wrap kicks in (1 = full face)
+      faceResolution:  1024,   // per-face texture width (px)
 
-      // --- camera ---
-      camDistLandscape: 8.0,   // camera distance on wide screens
-      camDistPortrait:  11.5,  // camera distance on tall screens
+      // motion / speeds
+      easeFactor:    0.12,                   // how fast the active slab settles facing you
+      groupIdleSpin: 0.0,                    // slow turn applied to the WHOLE cube
+      slabSpin0:     0.014,                  // turn speed of slab 1 when not active
+      slabSpin1:    -0.018,                  // slab 2
+      slabSpin2:     0.022,                  // slab 3
+      gestureThreshold: 45,                  // px of horizontal travel to change a word
 
-      // --- motion / speeds ---
-      easeFactor:    0.12,                 // how quickly the active line settles facing you (0–1)
-      groupIdleSpin: 0.0030,               // whole-cube slow turn (0 = still)
-      slabSpin:      [0.014, -0.018, 0.022], // per-slab turn speed when NOT the active line
-      gestureThreshold: 45,                // px of horizontal travel needed to change a word
-
-      // --- look ---
+      // look
       glassOpacity:   0.05,
-      edgeOpacity:    0.6,
-      dividerOpacity: 0.5,
-      glassColor:  0x6fa8d8,
-      edgeColor:   0xbfc6cc,
-      dividerColor:0xd5dade
+      edgeOpacity:    0.6
     };
-
+    const GLASS_COLOR = 0x6fa8d8, EDGE_COLOR = 0xbfc6cc;
     /* ================================================================ */
 
     const data = window.WORD_DATA;
@@ -78,42 +73,51 @@
     const randColor = () => sdgColors[Math.floor(Math.random() * sdgColors.length)];
     const contrast = ex => { const a = sdgColors.filter(c => c !== ex); return a[Math.floor(Math.random() * a.length)]; };
 
-    // ---------- state ----------
+    // ---------- content state ----------
     let nounIndex = 0, verbIndex = 0;
     let nounColor = randColor(), verbColor = contrast(nounColor);
 
-    // ---------- derived dimensions ----------
-    const L      = CONFIG.cubeWidth;            // cube width & depth
-    const CUBE_H = CONFIG.cubeHeight;
-    const SLICE  = CUBE_H / 3;                   // height of one slice
-    const positions = [SLICE, 0, -SLICE];
-
-    const WF = CONFIG.faceResolution;            // per-face canvas width
-    const HF = Math.round(WF * SLICE / L);       // per-face canvas height (matches face aspect)
-    const WM = WF * 4;                           // perimeter master width
-    const FONT_PX = Math.round(HF * CONFIG.fontScale);
-    const LETTER_SP = `${(FONT_PX * CONFIG.letterSpacingEm).toFixed(2)}px`;
-    const fontStr = `800 ${FONT_PX}px Inter, Arial, sans-serif`;
-
-    // ---------- text canvases (one perimeter master + 4 face crops per line) ----------
-    function makeLine() {
-      const master = document.createElement('canvas');
-      master.width = WM; master.height = HF;
-      const mctx = master.getContext('2d');
-      const faces = [];
-      for (let k = 0; k < 4; k++) {
-        const c = document.createElement('canvas');
-        c.width = WF; c.height = HF;
-        const tex = new THREE.CanvasTexture(c);
-        tex.anisotropy = 8; tex.minFilter = THREE.LinearFilter;
-        faces.push({ canvas: c, ctx: c.getContext('2d'), tex });
-      }
-      return { master, mctx, faces };
+    // ---------- derived dimensions (recomputed on geometry changes) ----------
+    let L, CUBE_H, SLICE, positionsY, WF, HF, WM, FONT_PX, LETTER_SP, fontStr;
+    function deriveDims() {
+      L = CONFIG.cubeWidth;
+      CUBE_H = CONFIG.cubeHeight;
+      SLICE = CUBE_H / 3;
+      const step = SLICE + CONFIG.lineSpacing;
+      positionsY = [step, 0, -step];
+      WF = CONFIG.faceResolution;
+      HF = Math.round(WF * SLICE / L);
+      WM = WF * 4;
+      deriveFont();
     }
-    const lineTex = [makeLine(), makeLine(), makeLine()];
+    function deriveFont() {
+      FONT_PX = Math.round(HF * CONFIG.fontScale);
+      LETTER_SP = `${(FONT_PX * CONFIG.letterSpacingEm).toFixed(2)}px`;
+      fontStr = `800 ${FONT_PX}px Inter, Arial, sans-serif`;
+    }
+
+    // ---------- text canvases (perimeter master + 4 face crops per line) ----------
+    let lineTex = [];
+    function makeTextures() {
+      lineTex = [];
+      for (let i = 0; i < 3; i++) {
+        const master = document.createElement('canvas');
+        master.width = WM; master.height = HF;
+        const mctx = master.getContext('2d');
+        const faces = [];
+        for (let k = 0; k < 4; k++) {
+          const c = document.createElement('canvas');
+          c.width = WF; c.height = HF;
+          const tex = new THREE.CanvasTexture(c);
+          tex.anisotropy = 8; tex.minFilter = THREE.LinearFilter;
+          faces.push({ canvas: c, ctx: c.getContext('2d'), tex });
+        }
+        lineTex.push({ master, mctx, faces });
+      }
+    }
 
     // contiguous source windows around the column (wraps at WM): left, front, right, back
-    const SRC_START = { front: 1.5 * WF, right: 2.5 * WF, back: 3.5 * WF, left: 0.5 * WF };
+    function srcStart(name) { return ({ front: 1.5, right: 2.5, back: 3.5, left: 0.5 }[name]) * WF; }
 
     function drawLine(idx, segs) {
       const L0 = lineTex[idx];
@@ -124,17 +128,16 @@
       mctx.textBaseline = 'middle';
       mctx.textAlign = 'left';
       const total = segs.reduce((w, s) => w + mctx.measureText(s.text).width, 0);
-      let x = (WM - total) / 2;                       // centre on the perimeter
+      let x = (WM - total) / 2;
       for (const seg of segs) {
         mctx.fillStyle = seg.color;
         mctx.fillText(seg.text, x, HF / 2 + 3);
         x += mctx.measureText(seg.text).width;
       }
-      const order = ['front', 'right', 'back', 'left'];
-      order.forEach((name, k) => {
+      ['front', 'right', 'back', 'left'].forEach((name, k) => {
         const f = L0.faces[k];
         f.ctx.clearRect(0, 0, WF, HF);
-        const start = SRC_START[name];
+        const start = srcStart(name);
         const first = Math.min(WF, WM - start);
         f.ctx.drawImage(L0.master, start, 0, first, HF, 0, 0, first, HF);
         if (first < WF) f.ctx.drawImage(L0.master, 0, 0, WF - first, HF, first, 0, WF - first, HF);
@@ -171,49 +174,57 @@
     const group = new THREE.Group();
     scene.add(group);
 
-    // transparent glass cube + edges + slice dividers
-    const boxGeo = new THREE.BoxGeometry(L, CUBE_H, L);
-    group.add(new THREE.Mesh(boxGeo, new THREE.MeshBasicMaterial({
-      color: CONFIG.glassColor, transparent: true, opacity: CONFIG.glassOpacity, side: THREE.DoubleSide, depthWrite: false
-    })));
-    group.add(new THREE.LineSegments(new THREE.EdgesGeometry(boxGeo),
-      new THREE.LineBasicMaterial({ color: CONFIG.edgeColor, transparent: true, opacity: CONFIG.edgeOpacity })));
-    function divider(y) {
-      const hw = L / 2;
-      const g = new THREE.BufferGeometry();
-      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
-        -hw, y, -hw,  hw, y, -hw,  hw, y, hw,  -hw, y, hw,  -hw, y, -hw
-      ]), 3));
-      return new THREE.Line(g, new THREE.LineBasicMaterial({ color: CONFIG.dividerColor, transparent: true, opacity: CONFIG.dividerOpacity }));
-    }
-    group.add(divider(CUBE_H / 6));
-    group.add(divider(-CUBE_H / 6));
-
-    // each slice = 4 vertical faces around the Y axis; double-sided so text shows from both sides
+    // each SLAB is one self-contained unit: its own glass box + its 4 text faces,
+    // so text is glued to the slab and they always rotate together.
     const HALF = Math.PI / 2;
     const faceDefs = [
-      { pos: [0, 0,  L / 2], rotY: 0 },        // front
-      { pos: [ L / 2, 0, 0], rotY:  HALF },    // right
-      { pos: [0, 0, -L / 2], rotY: Math.PI },  // back
-      { pos: [-L / 2, 0, 0], rotY: -HALF }     // left
+      { p: [0, 0,  0.5], rotY: 0 },        // front  (z = +L/2)
+      { p: [ 0.5, 0, 0], rotY:  HALF },    // right  (x = +L/2)
+      { p: [0, 0, -0.5], rotY: Math.PI },  // back
+      { p: [-0.5, 0, 0], rotY: -HALF }     // left
     ];
-    const planeGeo = new THREE.PlaneGeometry(L, SLICE);
-    const slices = [];
-    for (let i = 0; i < 3; i++) {
-      const sliceGroup = new THREE.Group();
-      sliceGroup.position.y = positions[i];
-      faceDefs.forEach((f, k) => {
-        const mat = new THREE.MeshBasicMaterial({ map: lineTex[i].faces[k].tex, transparent: true, side: THREE.DoubleSide, depthWrite: false });
-        const mesh = new THREE.Mesh(planeGeo, mat);
-        mesh.position.set(f.pos[0], f.pos[1], f.pos[2]);
-        mesh.rotation.y = f.rotY;
-        sliceGroup.add(mesh);
-      });
-      group.add(sliceGroup);
-      slices.push(sliceGroup);
+    let slabGroups = [], glassMats = [], edgeMats = [];
+
+    function clearGroup() {
+      while (group.children.length) {
+        const c = group.children.pop();
+        c.traverse && c.traverse(o => { o.geometry && o.geometry.dispose && o.geometry.dispose(); });
+        group.remove(c);
+      }
     }
 
-    relayout();
+    function buildScene() {
+      clearGroup();
+      slabGroups = []; glassMats = []; edgeMats = [];
+      const boxGeo = new THREE.BoxGeometry(L, SLICE, L);
+      const planeGeo = new THREE.PlaneGeometry(L, SLICE);
+      for (let i = 0; i < 3; i++) {
+        const slab = new THREE.Group();
+        slab.position.y = positionsY[i];
+
+        const gMat = new THREE.MeshBasicMaterial({ color: GLASS_COLOR, transparent: true, opacity: CONFIG.glassOpacity, side: THREE.DoubleSide, depthWrite: false });
+        slab.add(new THREE.Mesh(boxGeo, gMat));
+        glassMats.push(gMat);
+
+        const eMat = new THREE.LineBasicMaterial({ color: EDGE_COLOR, transparent: true, opacity: CONFIG.edgeOpacity });
+        slab.add(new THREE.LineSegments(new THREE.EdgesGeometry(boxGeo), eMat));
+        edgeMats.push(eMat);
+
+        faceDefs.forEach((f, k) => {
+          const mat = new THREE.MeshBasicMaterial({ map: lineTex[i].faces[k].tex, transparent: true, side: THREE.DoubleSide, depthWrite: false });
+          const mesh = new THREE.Mesh(planeGeo, mat);
+          mesh.position.set(f.p[0] * L, f.p[1], f.p[2] * L);
+          mesh.rotation.y = f.rotY;
+          slab.add(mesh);
+        });
+
+        group.add(slab);
+        slabGroups.push(slab);
+      }
+    }
+
+    function rebuildAll() { deriveDims(); makeTextures(); buildScene(); relayout(); }
+    rebuildAll();
 
     // ---------- interaction ----------
     let activeLine = 0;
@@ -236,16 +247,16 @@
     const TWO_PI = Math.PI * 2;
     function animate() {
       requestAnimationFrame(animate);
-      group.rotation.y += CONFIG.groupIdleSpin;             // whole cube keeps moving
+      group.rotation.y += CONFIG.groupIdleSpin;
+      const spins = [CONFIG.slabSpin0, CONFIG.slabSpin1, CONFIG.slabSpin2];
       for (let i = 0; i < 3; i++) {
-        const s = slices[i];
+        const s = slabGroups[i];
         if (i === activeLine) {
-          // face the camera in world space (cancel the group's idle spin), via the nearest turn
-          const desired = -group.rotation.y;
+          const desired = -group.rotation.y;                         // face camera in world space
           const target = desired + Math.round((s.rotation.y - desired) / TWO_PI) * TWO_PI;
           s.rotation.y += (target - s.rotation.y) * CONFIG.easeFactor;
         } else {
-          s.rotation.y += CONFIG.slabSpin[i];               // other slabs turn → text wraps around
+          s.rotation.y += spins[i];                                  // each slab turns on its own
         }
       }
       renderer.render(scene, camera);
@@ -256,12 +267,49 @@
       const w = window.innerWidth, h = window.innerHeight;
       renderer.setSize(w, h, false);
       camera.aspect = w / h;
-      camera.position.z = w / h < 1 ? CONFIG.camDistPortrait : CONFIG.camDistLandscape;
+      camera.position.z = w / h < 1 ? 11.5 : 8;
       camera.updateProjectionMatrix();
     }
     window.addEventListener('resize', resize);
     resize();
     animate();
+
+    // ---------- GUI ----------
+    const gui = new dat.GUI({ width: 300 });
+    const updateText = () => { deriveFont(); relayout(); };
+    const updatePositions = () => {
+      const step = SLICE + CONFIG.lineSpacing;
+      positionsY = [step, 0, -step];
+      slabGroups.forEach((s, i) => s.position.y = positionsY[i]);
+    };
+    const updateLook = () => {
+      glassMats.forEach(m => m.opacity = CONFIG.glassOpacity);
+      edgeMats.forEach(m => m.opacity = CONFIG.edgeOpacity);
+    };
+
+    const fText = gui.addFolder('Text');
+    fText.add(CONFIG, 'fontScale', 0.3, 1.6, 0.01).name('font scale').onChange(updateText);
+    fText.add(CONFIG, 'letterSpacingEm', -0.2, 0.3, 0.005).name('letter spacing').onChange(updateText);
+    fText.open();
+
+    const fGeo = gui.addFolder('Geometry');
+    fGeo.add(CONFIG, 'cubeWidth', 2, 9, 0.1).name('width / depth').onChange(rebuildAll);
+    fGeo.add(CONFIG, 'cubeHeight', 2, 9, 0.1).name('height').onChange(rebuildAll);
+    fGeo.add(CONFIG, 'lineSpacing', -0.5, 2.5, 0.01).name('line spacing').onChange(updatePositions);
+    fGeo.open();
+
+    const fMotion = gui.addFolder('Motion');
+    fMotion.add(CONFIG, 'easeFactor', 0.02, 0.4, 0.01).name('settle ease');
+    fMotion.add(CONFIG, 'groupIdleSpin', 0, 0.02, 0.0005).name('whole-cube spin');
+    fMotion.add(CONFIG, 'slabSpin0', -0.06, 0.06, 0.001).name('slab 1 spin');
+    fMotion.add(CONFIG, 'slabSpin1', -0.06, 0.06, 0.001).name('slab 2 spin');
+    fMotion.add(CONFIG, 'slabSpin2', -0.06, 0.06, 0.001).name('slab 3 spin');
+    fMotion.add(CONFIG, 'gestureThreshold', 5, 150, 1).name('change threshold');
+    fMotion.open();
+
+    const fLook = gui.addFolder('Look');
+    fLook.add(CONFIG, 'glassOpacity', 0, 0.5, 0.01).name('glass opacity').onChange(updateLook);
+    fLook.add(CONFIG, 'edgeOpacity', 0, 1, 0.01).name('edge opacity').onChange(updateLook);
   })();
   </script>
 </body>
