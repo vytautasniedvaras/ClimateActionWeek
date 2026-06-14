@@ -200,6 +200,12 @@
       this.active = false;              // selected -> shows boundary + handles + panels
       this.preview = false;             // preview mode hides editing chrome
 
+      // per-breakpoint variants: each is a full serialize() payload. The live
+      // DOM reflects the active breakpoint; switching saves the current one and
+      // restores the other (cloning it the first time).
+      this.breakpoint = 'desktop';
+      this.variants = { desktop: null, mobile: null };
+
       // semantic + format state
       this.tag = 'untagged';
       this.format = {};                 // last applyFormat payload (for serialize)
@@ -504,6 +510,42 @@
       this.preview = !!on;
       this.el.classList.toggle('byo-textcomp--preview', this.preview);
       if (this.preview) this.deactivate(true);
+    }
+
+    /* ---------------- breakpoint variants (desktop / mobile) ----------------
+       Everything is per-breakpoint: a variant is a full serialize() payload.
+       Switching saves the current breakpoint and restores the target (cloning
+       the current one the first time the target is visited). */
+    setBreakpoint(bp) {
+      bp = bp === 'mobile' ? 'mobile' : 'desktop';
+      if (bp === this.breakpoint) return;
+      this.variants[this.breakpoint] = this.serialize();
+      if (!this.variants[bp]) this.variants[bp] = JSON.parse(JSON.stringify(this.variants[this.breakpoint]));
+      this.breakpoint = bp;
+      this.deserialize(this.variants[bp]);
+      if (this._fxController) this._fxController.refresh();
+    }
+    copyToOtherBreakpoint() {
+      const other = this.breakpoint === 'desktop' ? 'mobile' : 'desktop';
+      this.variants[other] = this.serialize();
+    }
+    // full per-breakpoint snapshot (for the document export)
+    serializeAll() {
+      this.variants[this.breakpoint] = this.serialize();
+      return { breakpoint: this.breakpoint, variants: { desktop: this.variants.desktop, mobile: this.variants.mobile } };
+    }
+    deserializeAll(state) {
+      state = state || {};
+      if (state.variants) {
+        this.variants = { desktop: state.variants.desktop || null, mobile: state.variants.mobile || null };
+        this.breakpoint = state.breakpoint === 'mobile' ? 'mobile' : 'desktop';
+        const payload = this.variants[this.breakpoint] || this.variants.desktop || this.variants.mobile;
+        if (payload) this.deserialize(payload);
+      } else {
+        this.deserialize(state);
+      }
+      if (this._fxController) this._fxController.refresh();
+      return this;
     }
 
     /* ---------------- per-word wrapping (caret + data-color preserving) ---------------- */
@@ -1055,6 +1097,9 @@
 
     deserialize(state) {
       state = state || {};
+      // detach any existing warp first so re-deserializing (e.g. switching
+      // breakpoints) doesn't leave a stale overlay when the new state differs.
+      this.detachWarp();
       // positioning: prefer the 2D corner-anchor model; migrate legacy
       // leftPct/rightPct (full-width inset) into it for old documents.
       if (state.pos) {

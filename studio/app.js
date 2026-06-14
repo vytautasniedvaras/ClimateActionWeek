@@ -18,7 +18,9 @@
   // single source of truth for app-level state (recents serialize/export later)
   const state = {
     recentColors: [],
-    activeComponent: null
+    activeComponent: null,
+    breakpoint: 'desktop',
+    preview: false
   };
 
   function init() {
@@ -136,10 +138,98 @@
       else if (e.key === 'p' || e.key === 'P') { e.preventDefault(); setPreview(!state.preview); }
     });
 
+    /* ---- breakpoint switching: apply to EVERY box at once ---- */
+    function setBreakpoint(bp) {
+      state.breakpoint = bp === 'mobile' ? 'mobile' : 'desktop';
+      components.forEach(function (c) { c.setBreakpoint(state.breakpoint); });
+      recomputeLayout();
+      bpBtn.textContent = 'Breakpoint: ' + state.breakpoint;
+    }
+
+    /* ---- document persistence: JSON export / import + localStorage autosave.
+       The document is { version, breakpoint, recentColors, components:[
+       {breakpoint, variants:{desktop,mobile}} ] } — both breakpoints round-
+       trip. (Structured so it can be emitted as Markdown+YAML later.) ---- */
+    function exportDocument() {
+      return {
+        version: 1,
+        breakpoint: state.breakpoint,
+        recentColors: state.recentColors.slice(),
+        components: components.map(function (c) { return c.serializeAll(); })
+      };
+    }
+    function downloadDocument() {
+      const blob = new Blob([JSON.stringify(exportDocument(), null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url; link.download = 'studio-document.json';
+      document.body.appendChild(link); link.click(); link.remove();
+      URL.revokeObjectURL(url);
+    }
+    function importDocument(doc) {
+      if (!doc || !Array.isArray(doc.components)) return;
+      components.forEach(function (c) { c.destroy(); });
+      components.length = 0;
+      state.breakpoint = doc.breakpoint === 'mobile' ? 'mobile' : 'desktop';
+      state.recentColors = Array.isArray(doc.recentColors) ? doc.recentColors : [];
+      doc.components.forEach(function (cs) {
+        const c = BYO.TextComponent.create({ mount: document.body });
+        c.deserializeAll(cs);
+        if (c.breakpoint !== state.breakpoint) c.setBreakpoint(state.breakpoint);
+        components.push(c);
+      });
+      state.components = components;
+      recomputeLayout();
+      if (components[0]) components[0].activate();
+      bpBtn.textContent = 'Breakpoint: ' + state.breakpoint;
+    }
+
+    /* ---- Document panel (app-level; stays while nothing is selected) ---- */
+    const docPanel = BYO.Panel.create({ title: 'Document', id: 'devui-document', width: 200 });
+    docPanel.setPosition(540, 16);
+    function docBtn(label, fn) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = label;
+      b.style.cssText = 'width:100%;padding:5px;margin:2px 0;font:inherit;cursor:pointer;border:1px solid #ccc;border-radius:3px;background:#fff;';
+      b.addEventListener('mousedown', function (e) { e.preventDefault(); });
+      b.addEventListener('click', fn);
+      docPanel.body.appendChild(b);
+      return b;
+    }
+    const bpBtn = docBtn('Breakpoint: desktop', function () { setBreakpoint(state.breakpoint === 'desktop' ? 'mobile' : 'desktop'); });
+    docBtn('Copy layout to other bp', function () { components.forEach(function (c) { c.copyToOtherBreakpoint(); }); });
+    docBtn('Preview (P)', function () { setPreview(!state.preview); });
+    docBtn('Export JSON', downloadDocument);
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file'; fileInput.accept = 'application/json,.json'; fileInput.style.display = 'none';
+    fileInput.addEventListener('change', function () {
+      const f = fileInput.files && fileInput.files[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = function () { try { importDocument(JSON.parse(reader.result)); } catch (err) { window.alert('Import failed: ' + err.message); } };
+      reader.readAsText(f);
+      fileInput.value = '';
+    });
+    docPanel.body.appendChild(fileInput);
+    docBtn('Import JSON', function () { fileInput.click(); });
+
+    /* ---- localStorage autosave (debounced periodic) + restore on load ---- */
+    const LS_KEY = 'byo-studio-doc';
+    function autosave() { try { localStorage.setItem(LS_KEY, JSON.stringify(exportDocument())); } catch (e) { /* quota / disabled */ } }
+    try {
+      const saved = localStorage.getItem(LS_KEY);
+      if (saved) importDocument(JSON.parse(saved));
+    } catch (e) { /* ignore corrupt save */ }
+    setInterval(autosave, 5000);
+    window.addEventListener('beforeunload', autosave);
+
     // expose for debugging / export-import
     state.setPreview = setPreview;
+    state.setBreakpoint = setBreakpoint;
     state.recomputeLayout = recomputeLayout;
-    window.__BYO_APP__ = { state: state, components: components, getActive: getActive, setPreview: setPreview };
+    state.exportDocument = exportDocument;
+    state.importDocument = importDocument;
+    window.__BYO_APP__ = { state: state, components: components, getActive: getActive, setPreview: setPreview, setBreakpoint: setBreakpoint, exportDocument: exportDocument, importDocument: importDocument };
   }
 
   if (document.readyState === 'loading') {
