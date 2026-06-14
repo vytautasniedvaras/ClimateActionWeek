@@ -87,6 +87,7 @@ window.WORD_DATA = {
       cubeSize:      1.15,   // base half-extent of the cube (world units; the gizmo scales on top)
       strength:      1.35,   // how far the text is pushed onto the cube's front faces
       edgeBand:      0.6,    // seam width where projected text eases back to flat
+      facingCut:     0.2,    // drop triangles steeper than this (kills the edge-on glow; keeps colour flat)
 
       // --- motion (mouse-driven "heading", with momentum into a slow idle spin) ---
       paused:        false,  // freeze ALL motion (gizmo still works)
@@ -100,15 +101,23 @@ window.WORD_DATA = {
       // --- word interaction ---
       wordThreshold: 55,     // px of horizontal travel over a line to change its word
 
-      // --- text ---
+      // --- text (auto-shrinks per line so it always fits the width) ---
       texResolution: 3072,   // width in px of the rendered text texture (higher = sharper)
-      fontScale:     0.135,  // line height as a fraction of the text-canvas height
+      textSize:      0.118,  // base line height as a fraction of the text-canvas height
+      leftMargin:    0.04,   // left/right inset as a fraction of width
+      letterSpacing: -0.03,  // letter spacing in em (negative = tighter)
+      wordSpacing:   0.0,    // extra spacing at spaces, in em
+      lineSpacing:   1.02,   // line-height multiplier
       autoCycle:     0.0,    // seconds between automatic word changes (0 = off)
 
       // --- helpers ---
       showGuide:     true    // show the wireframe cube + gizmo
     };
     /* ================================================================ */
+
+    // how much bigger the text plane is than the visible frustum (1.0 = exactly
+    // the screen, so the left margin maps to the real screen edge)
+    const PLANE_OVERSCAN = 1.0;
 
     const data  = window.WORD_DATA;
     const nouns = data.nouns;
@@ -156,18 +165,27 @@ window.WORD_DATA = {
         [ { t: verb + ' ', c: verbColor }, { t: 'SCIENCE', c: '#000' } ]
       ];
 
-      const fontPx = Math.round(H * CONFIG.fontScale);
-      const lineH  = fontPx * 0.98;
+      const baseFont = Math.round(H * CONFIG.textSize);
+      const lineH    = baseFont * CONFIG.lineSpacing;
+      const marginX  = W * CONFIG.leftMargin;
+      const avail    = W - marginX * 2;        // usable width (symmetric inset)
       tctx.textBaseline = 'middle';
       tctx.textAlign = 'left';
-      tctx.font = `800 ${fontPx}px Inter, Arial, sans-serif`;
-      if ('letterSpacing' in tctx) tctx.letterSpacing = `${(-0.04 * fontPx).toFixed(2)}px`;
 
-      const marginX = W * 0.045;
-      const blockH  = lineH * lines.length;
+      const setFont = (px) => {
+        tctx.font = `800 ${px}px Inter, Arial, sans-serif`;
+        if ('letterSpacing' in tctx) tctx.letterSpacing = `${(CONFIG.letterSpacing * px).toFixed(2)}px`;
+        if ('wordSpacing'   in tctx) tctx.wordSpacing   = `${(CONFIG.wordSpacing   * px).toFixed(2)}px`;
+      };
+      const widthOf = (segs) => segs.reduce((w, s) => w + tctx.measureText(s.t).width, 0);
+
+      const blockH = lineH * lines.length;
       let y = (H - blockH) / 2 + lineH / 2;
 
       for (const segs of lines) {
+        setFont(baseFont);
+        let w = widthOf(segs);
+        if (w > avail) { setFont(Math.floor(baseFont * avail / w)); }  // shrink this line to fit
         let x = marginX;
         for (const s of segs) {
           tctx.fillStyle = s.c;
@@ -195,13 +213,13 @@ window.WORD_DATA = {
     // which of the 3 lines (0,1,2) is the cursor near, in screen space?
     // Uses the flat text layout (lines centred as a block); -1 if none.
     function hoverLine(py) {
-      const f = CONFIG.fontScale * 0.98;       // line height as a fraction of canvas height
+      const f = CONFIG.textSize * CONFIG.lineSpacing;   // line height as a fraction of canvas height
       const sH = window.innerHeight;
-      const half = 0.62 * f * 1.12;            // vertical tolerance (screen fraction)
+      const half = 0.62 * f * PLANE_OVERSCAN;  // vertical tolerance (screen fraction)
       const t = py / sH;
       for (let i = 0; i < 3; i++) {
-        const fy = 0.5 - 1.5 * f + f * (i + 0.5);   // canvas-fraction of line i centre
-        const sy = 0.5 - (0.5 - fy) * 1.12;         // -> screen-fraction (plane is 1.12x the frustum)
+        const fy = 0.5 - 1.5 * f + f * (i + 0.5);          // canvas-fraction of line i centre
+        const sy = 0.5 - (0.5 - fy) * PLANE_OVERSCAN;      // -> screen-fraction
         if (Math.abs(t - sy) < half) return i;
       }
       return -1;
@@ -281,28 +299,28 @@ window.WORD_DATA = {
     const fragmentShader = `
       uniform sampler2D uTex;
       uniform vec3 uCamPos;
+      uniform float uFacingCut;
       varying vec2 vUv;
       varying vec3 vWorld;
       void main() {
         vec4 c = texture2D(uTex, vUv);
         if (c.a < 0.02) discard;          // transparent everywhere except the glyphs
 
-        // Fade out triangles that the displacement has stretched edge-on to the
-        // camera (the "wall" smears at the cube silhouette) so they don't show
-        // as grey/jagged shards. Front-facing text stays fully opaque.
+        // Drop triangles the displacement has stretched edge-on to the camera
+        // (the "wall" smears at the silhouette). Hard cut -> no translucent
+        // fade, so the surviving text keeps a FLAT, fully-opaque colour.
         vec3 n = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
         vec3 v = normalize(uCamPos - vWorld);
-        float facing = abs(dot(n, v));
-        float a = c.a * smoothstep(0.05, 0.32, facing);
-        if (a < 0.02) discard;
+        if (abs(dot(n, v)) < uFacingCut) discard;
 
-        gl_FragColor = vec4(c.rgb, a);
+        gl_FragColor = vec4(c.rgb, c.a);
       }
     `;
 
     const uniforms = {
       uTex:      { value: texture },
       uCamPos:   { value: new THREE.Vector3(0, 0, CAM_DIST) },
+      uFacingCut:{ value: CONFIG.facingCut },
       uCubeInv:  { value: new THREE.Matrix4() },
       uHalf:     { value: new THREE.Vector3(CONFIG.cubeSize, CONFIG.cubeSize, CONFIG.cubeSize) },
       uStrength: { value: CONFIG.strength },
@@ -321,7 +339,7 @@ window.WORD_DATA = {
       const aspect = window.innerWidth / window.innerHeight;
       const visH = 2 * CAM_DIST * Math.tan((CAM_FOV * Math.PI / 180) / 2);
       const visW = visH * aspect;
-      const W = visW * 1.12, H = visH * 1.12;
+      const W = visW * PLANE_OVERSCAN, H = visH * PLANE_OVERSCAN;
       const segX = 240, segY = Math.max(40, Math.round(240 / aspect));
       plane = new THREE.Mesh(new THREE.PlaneGeometry(W, H, segX, segY), material);
       scene.add(plane);
@@ -352,6 +370,7 @@ window.WORD_DATA = {
         baseQuat.copy(cube.quaternion);
         baseScale.copy(cube.scale);
         motionSpin.identity();
+        nextGizmoMode();          // after a finished drag-drop, switch to the next widget
       }
     });
 
@@ -482,6 +501,7 @@ window.WORD_DATA = {
       uniforms.uHalf.value.set(CONFIG.cubeSize, CONFIG.cubeSize, CONFIG.cubeSize);
       uniforms.uStrength.value = CONFIG.strength;
       uniforms.uEdgeBand.value = CONFIG.edgeBand;
+      uniforms.uFacingCut.value = CONFIG.facingCut;
 
       renderer.render(scene, camera);
     }
@@ -522,6 +542,7 @@ window.WORD_DATA = {
     fCube.add(CONFIG, 'cubeSize', 0.4, 2.4, 0.01).name('size').onChange(buildGuide);
     fCube.add(CONFIG, 'strength', 0.5, 3.5, 0.01).name('projection depth');
     fCube.add(CONFIG, 'edgeBand', 0.05, 1.5, 0.01).name('seam softness');
+    fCube.add(CONFIG, 'facingCut', 0.0, 0.6, 0.01).name('edge cutoff');
     fCube.add(CONFIG, 'showGuide').name('show guide + gizmo').onChange(v => {
       guide.visible = v; tc.enabled = v; tc.visible = v;
     });
@@ -556,7 +577,11 @@ window.WORD_DATA = {
 
     const fText = gui.addFolder('Text');
     fText.add(CONFIG, 'texResolution', 1024, 8192, 256).name('texture res (px)').onChange(rebuildTexture);
-    fText.add(CONFIG, 'fontScale', 0.06, 0.26, 0.005).name('font size').onChange(drawText);
+    fText.add(CONFIG, 'textSize', 0.05, 0.22, 0.002).name('text size').onChange(drawText);
+    fText.add(CONFIG, 'leftMargin', 0.0, 0.25, 0.005).name('left margin').onChange(drawText);
+    fText.add(CONFIG, 'letterSpacing', -0.12, 0.2, 0.005).name('letter spacing').onChange(drawText);
+    fText.add(CONFIG, 'wordSpacing', -0.1, 0.6, 0.01).name('word spacing').onChange(drawText);
+    fText.add(CONFIG, 'lineSpacing', 0.7, 1.6, 0.01).name('line spacing').onChange(drawText);
     fText.add(CONFIG, 'autoCycle', 0, 6, 0.5).name('auto-change (s)');
     fText.open();
   })();
