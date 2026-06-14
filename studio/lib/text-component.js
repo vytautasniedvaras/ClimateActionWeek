@@ -969,6 +969,7 @@
             ? Object.assign({}, this.warp.surfaceOpts)
             : (this.isWarped ? { projection: 0.45, facingCut: 0.12 } : null),
           config: this.warp ? Object.assign({}, this.warp.config) : null,
+          size: this.warp ? this.warp.size : null,
           model: this.warp ? this._serializeModel(this.warp.model) : null
         }
       };
@@ -1048,6 +1049,7 @@
         // defaults if surfaceOpts is null (mid-drag serialize edge case).
         this.attachWarp(state.warp.surfaceOpts || {});
         if (this.warp) {
+          if (state.warp.size != null && this.warp.setSize) this.warp.setSize(state.warp.size);
           if (state.warp.config) {
             // motion config is live two-way bound; copy known keys
             Object.assign(this.warp.config, state.warp.config);

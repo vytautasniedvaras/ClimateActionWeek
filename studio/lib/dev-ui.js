@@ -389,6 +389,77 @@
     spinRow.appendChild(spinOut);
     warpPanel.body.appendChild(spinRow);
 
+    /* ---- cube SHAPE controls: precise numeric path so the user rarely has to
+       fight the gizmo. size / 6 face offsets / position XYZ / rotation XYZ,
+       all bound live to active.warp (model + size). Two-way: a gizmo drag is
+       read back into these sliders each frame (see the readback loop). ---- */
+    const DEG = 180 / Math.PI;
+    function warpRow(label, min, max, step, val) {
+      const r = row(label);
+      const sl = rangeInput(min, max, step, val);
+      const out = valOut(sl.value);
+      r.appendChild(sl); r.appendChild(out);
+      warpPanel.body.appendChild(r);
+      sl.addEventListener('input', function () { out.textContent = sl.value; });
+      sl._out = out;
+      return sl;
+    }
+    function setSL(sl, v) { const n = Math.round(v * 100) / 100; sl.value = String(n); if (sl._out) sl._out.textContent = String(n); }
+
+    const sizeSlider = warpRow('Size', 0.1, 4, 0.01, 1);
+    sizeSlider.addEventListener('input', function () { const a = getActive(); if (a && a.warp && a.warp.setSize) a.warp.setSize(Number(sizeSlider.value)); });
+
+    // face offsets — clamped to a STRETCH-SAFE sub-range (the model allows up to
+    // 3, but planar UVs smear the text badly past ~1.5; keep the slider tighter).
+    const faceIds = ['xp', 'xn', 'yp', 'yn', 'zp', 'zn'];
+    const faceSliders = {};
+    faceIds.forEach(function (id) {
+      const sl = warpRow('Face ' + id, -0.9, 1.5, 0.01, 0);
+      faceSliders[id] = sl;
+      sl.addEventListener('input', function () {
+        const a = getActive();
+        if (a && a.warp && a.warp.model) { a.warp.model.faceOffset[id] = Number(sl.value); a.warp.gizmo.setTransform(a.warp.model); }
+      });
+    });
+
+    const posSliders = {};
+    ['x', 'y', 'z'].forEach(function (ax) {
+      const sl = warpRow('Pos ' + ax, -3, 3, 0.01, 0);
+      posSliders[ax] = sl;
+      sl.addEventListener('input', function () {
+        const a = getActive();
+        if (a && a.warp && a.warp.model) { a.warp.model.position[ax] = Number(sl.value); a.warp.gizmo.setTransform(a.warp.model); }
+      });
+    });
+
+    const rotSliders = {};
+    ['x', 'y', 'z'].forEach(function (ax) {
+      const sl = warpRow('Rot ' + ax, -180, 180, 1, 0);
+      rotSliders[ax] = sl;
+      sl.addEventListener('input', function () {
+        const a = getActive();
+        if (a && a.warp && a.warp.model) {
+          const e = new THREE.Euler(Number(rotSliders.x.value) / DEG, Number(rotSliders.y.value) / DEG, Number(rotSliders.z.value) / DEG, 'XYZ');
+          a.warp.model.quaternion.setFromEuler(e);
+          a.warp.gizmo.setTransform(a.warp.model);
+        }
+      });
+    });
+
+    // read the live model back into the cube-shape sliders (gizmo two-way sync)
+    function readbackCubeShape(a) {
+      if (!a || !a.warp) return;
+      if (a.warp.size != null) setSL(sizeSlider, a.warp.size);
+      const m = a.warp.model;
+      if (!m) return;
+      faceIds.forEach(function (id) { setSL(faceSliders[id], m.faceOffset[id] || 0); });
+      ['x', 'y', 'z'].forEach(function (ax) { setSL(posSliders[ax], m.position[ax] || 0); });
+      const e = new THREE.Euler().setFromQuaternion(m.quaternion, 'XYZ');
+      setSL(rotSliders.x, Math.round(e.x * DEG)); setSL(rotSliders.y, Math.round(e.y * DEG)); setSL(rotSliders.z, Math.round(e.z * DEG));
+    }
+    // while the gizmo is being dragged, mirror the transform into the panel
+    (function loop() { const a = getActive(); if (a && a.warp && a.warp.isDragging) readbackCubeShape(a); requestAnimationFrame(loop); })();
+
     function refreshWarpToggle() {
       const a = getActive();
       warpToggle.textContent = (a && a.isWarped) ? 'Disable warp' : 'Enable warp';
@@ -402,6 +473,7 @@
           if (a.warp.surfaceOpts.facingCut != null) edgeSlider.value = String(a.warp.surfaceOpts.facingCut);
         }
         if (a.warp.config && a.warp.config.slowSpin != null) spinSlider.value = String(a.warp.config.slowSpin);
+        readbackCubeShape(a);
       }
       projOut.textContent = projSlider.value;
       edgeOut.textContent = edgeSlider.value;

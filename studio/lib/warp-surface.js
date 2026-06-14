@@ -45,6 +45,12 @@
           float mask = smoothstep(0.0, uEdgeBand, thi - tlo);
           z = mix(wp.z, min(thi * uStrength, uMaxLift), mask);
         }
+        // NOTE: UVs are the flat plane's own coords and do NOT follow the Z
+        // displacement, so extruding a face (which enlarges the box + lifts
+        // these vertices) STRETCHES the sampled text over that face. Inherent to
+        // planar UVs; the Warp panel bounds face-offset to a stretch-tolerable
+        // range. A true fix (reproject UV from displaced local position) is a
+        // follow-up that would change this line.
         vUv = uv; vWorld = vec3(wp.x, wp.y, z);
         gl_Position = projectionMatrix * viewMatrix * vec4(wp.x, wp.y, z, 1.0);
       }`,
