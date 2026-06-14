@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BYO — Vanishing Point</title>
+  <style>
+    html, body {
+      height: 100%; margin: 0; background: #ffffff; overflow: hidden;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+      cursor: pointer;
+    }
+    /* the stage carries the perspective + perspective-origin (= the vanishing point) */
+    .stage { position: fixed; inset: 0; }
+    .cube  { position: absolute; left: 50%; top: 50%; width: 0; height: 0; transform-style: preserve-3d; }
+    .face {
+      position: absolute; left: 0; top: 0;
+      display: flex; align-items: center; justify-content: center;
+      box-sizing: border-box;
+      font-weight: 800; text-transform: uppercase; white-space: nowrap;
+      backface-visibility: visible;          /* text visible from both sides */
+      user-select: none;
+    }
+    .hint {
+      position: fixed; left: 14px; bottom: 12px; font-size: 12px;
+      letter-spacing: .02em; color: #9aa0a6; user-select: none; pointer-events: none;
+    }
+    /* a small dot marking the current vanishing point */
+    .vp { position: fixed; width: 9px; height: 9px; border-radius: 50%;
+          background: #ff3b30; transform: translate(-50%, -50%);
+          pointer-events: none; opacity: .0; transition: opacity .3s; }
+  </style>
+</head>
+<body>
+  <div class="stage" id="stage">
+    <div class="cube" id="cube">
+      <div class="face" data-name="front"></div>
+      <div class="face" data-name="back"></div>
+      <div class="face" data-name="right"></div>
+      <div class="face" data-name="left"></div>
+      <div class="face" data-name="top"></div>
+      <div class="face" data-name="bottom"></div>
+    </div>
+  </div>
+  <div class="vp" id="vpDot"></div>
+  <div class="hint">move horizontally over the top half to change the noun · bottom half for the verb · the vanishing point jumps on every change</div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
+  <script src="word-pairings.js"></script>
+  <script>
+  (function () {
+
+    /* ================================================================
+       CONFIG — also editable live in the GUI (top-right)
+       ================================================================ */
+    const CONFIG = {
+      // --- perspective / vanishing point ---
+      perspective:     650,   // px — smaller = stronger, more dramatic convergence
+      vpTransitionMs:  600,   // how long the vanishing point glides to its new spot
+      vpXmin: 15, vpXmax: 85, // horizontal range the VP can jump to (% of viewport)
+      vpYmin: 20, vpYmax: 80, // vertical range
+      showVpDot: true,        // show a marker at the current vanishing point
+
+      // --- cube / stick dimensions (px) ---
+      width:  560,            // make these unequal for a "stick"
+      height: 240,
+      depth:  360,
+
+      // --- orientation / motion ---
+      baseRotX: -16,          // base tilt
+      baseRotY:  26,
+      autoSpin:  6,           // deg per second around Y (0 = still)
+
+      // --- text ---
+      fontPx:        58,
+      letterSpacing: -2,      // px (negative = tighter)
+
+      // --- look ---
+      faceOpacity:   0.0,     // face fill (0 = fully transparent)
+      borderWidth:   1.5,     // cube edge thickness
+      edgeColor:   '#cfd6db'
+    };
+    /* ================================================================ */
+
+    const data = window.WORD_DATA;
+    const nouns = data.nouns;
+
+    const sdgColors = [
+      '#E5233D', '#DDA73A', '#4CA146', '#C5192D', '#EF402C', '#27BFE6',
+      '#FBC412', '#A31C44', '#F26A2D', '#E01483', '#F89D2A', '#BF8D2C',
+      '#407F46', '#1F97D4', '#59BA48', '#126A9F', '#13496B'
+    ];
+    const rand = (a, b) => a + Math.random() * (b - a);
+    const randColor = () => sdgColors[Math.floor(Math.random() * sdgColors.length)];
+    const contrast = ex => { const a = sdgColors.filter(c => c !== ex); return a[Math.floor(Math.random() * a.length)]; };
+
+    // ---------- content state ----------
+    let nounIndex = 0, verbIndex = 0;
+    let nounColor = randColor(), verbColor = contrast(nounColor);
+
+    // ---------- DOM ----------
+    const stage = document.getElementById('stage');
+    const cube  = document.getElementById('cube');
+    const vpDot = document.getElementById('vpDot');
+    const faces = {};
+    document.querySelectorAll('.face').forEach(f => faces[f.dataset.name] = f);
+
+    // lines → face pairs:  front/back = line1, top/bottom = line2, left/right = line3
+    function lineHTML(segs) {
+      return segs.map(s => `<span style="color:${s.color}">${s.text}</span>`).join('');
+    }
+    function relayout() {
+      const n = nouns[nounIndex];
+      const verb = n.verbs[verbIndex % n.verbs.length].toUpperCase();
+      const l1 = lineHTML([{ text: 'BYO ', color: '#000' }, { text: n.word, color: nounColor }]);
+      const l2 = lineHTML([{ text: 'HOW CAN ', color: '#000' }, { text: n.plural, color: nounColor }]);
+      const l3 = lineHTML([{ text: verb + ' ', color: verbColor }, { text: 'SCIENCE', color: '#000' }]);
+      faces.front.innerHTML = faces.back.innerHTML  = l1;
+      faces.top.innerHTML   = faces.bottom.innerHTML = l2;
+      faces.left.innerHTML  = faces.right.innerHTML  = l3;
+    }
+
+    // ---------- geometry ----------
+    function layoutCube() {
+      const W = CONFIG.width, H = CONFIG.height, D = CONFIG.depth;
+      const def = {
+        front:  { w: W, h: H, t: `translateZ(${D / 2}px)` },
+        back:   { w: W, h: H, t: `rotateY(180deg) translateZ(${D / 2}px)` },
+        right:  { w: D, h: H, t: `rotateY(90deg) translateZ(${W / 2}px)` },
+        left:   { w: D, h: H, t: `rotateY(-90deg) translateZ(${W / 2}px)` },
+        top:    { w: W, h: D, t: `rotateX(90deg) translateZ(${H / 2}px)` },
+        bottom: { w: W, h: D, t: `rotateX(-90deg) translateZ(${H / 2}px)` }
+      };
+      for (const name in def) {
+        const f = faces[name], d = def[name];
+        f.style.width  = d.w + 'px';
+        f.style.height = d.h + 'px';
+        f.style.marginLeft = (-d.w / 2) + 'px';
+        f.style.marginTop  = (-d.h / 2) + 'px';
+        f.style.transform = d.t;
+        f.style.fontSize = CONFIG.fontPx + 'px';
+        f.style.letterSpacing = CONFIG.letterSpacing + 'px';
+        f.style.border = `${CONFIG.borderWidth}px solid ${CONFIG.edgeColor}`;
+        f.style.background = `rgba(110,168,216,${CONFIG.faceOpacity})`;
+      }
+    }
+
+    function applyPerspective() {
+      stage.style.perspective = CONFIG.perspective + 'px';
+      stage.style.transition  = `perspective-origin ${CONFIG.vpTransitionMs}ms ease`;
+    }
+
+    // ---------- vanishing point ----------
+    let vpX = 50, vpY = 50;
+    function setVP(x, y) {
+      vpX = x; vpY = y;
+      stage.style.perspectiveOrigin = `${x}% ${y}%`;
+      vpDot.style.left = (x / 100 * window.innerWidth) + 'px';
+      vpDot.style.top  = (y / 100 * window.innerHeight) + 'px';
+      vpDot.style.opacity = CONFIG.showVpDot ? 0.9 : 0;
+    }
+    function randomizeVP() {
+      setVP(rand(CONFIG.vpXmin, CONFIG.vpXmax), rand(CONFIG.vpYmin, CONFIG.vpYmax));
+    }
+
+    // ---------- cycles (each change jumps the vanishing point) ----------
+    function cycleNoun() {
+      nounIndex = (nounIndex + 1) % nouns.length;
+      nounColor = randColor(); verbIndex = 0; verbColor = contrast(nounColor);
+      relayout(); randomizeVP();
+    }
+    function cycleVerb() {
+      verbIndex = (verbIndex + 1) % nouns[nounIndex].verbs.length;
+      verbColor = contrast(nounColor);
+      relayout(); randomizeVP();
+    }
+
+    // ---------- interaction ----------
+    let lastX = [0, 0], lastY = 0;
+    const gestureThreshold = 45;
+    function handleMove(cx, cy) {
+      const zone = cy < window.innerHeight / 2 ? 0 : 1;   // 0 = noun (top), 1 = verb (bottom)
+      const dx = cx - lastX[zone], dy = cy - lastY;
+      if (Math.abs(dx) > gestureThreshold && Math.abs(dx) > Math.abs(dy)) {
+        zone === 0 ? cycleNoun() : cycleVerb();
+        lastX[zone] = cx;
+      }
+      lastY = cy;
+    }
+    window.addEventListener('mousemove', e => handleMove(e.clientX, e.clientY));
+    window.addEventListener('touchmove', e => { e.preventDefault(); const t = e.touches[0]; handleMove(t.clientX, t.clientY); }, { passive: false });
+
+    // ---------- render loop (orientation + autospin) ----------
+    let ry = CONFIG.baseRotY, last = null;
+    function frame(ts) {
+      requestAnimationFrame(frame);
+      if (last == null) last = ts;
+      const dt = (ts - last) / 1000; last = ts;
+      ry += CONFIG.autoSpin * dt;
+      cube.style.transform = `rotateX(${CONFIG.baseRotX}deg) rotateY(${ry}deg)`;
+    }
+
+    // ---------- init ----------
+    function initAll() { layoutCube(); applyPerspective(); relayout(); }
+    initAll();
+    setVP(50, 45);
+    window.addEventListener('resize', () => setVP(vpX, vpY));
+    requestAnimationFrame(frame);
+
+    // ---------- GUI ----------
+    const gui = new dat.GUI({ width: 320 });
+
+    const fVP = gui.addFolder('Vanishing point');
+    fVP.add(CONFIG, 'perspective', 200, 2000, 10).name('perspective').onChange(applyPerspective);
+    fVP.add(CONFIG, 'vpTransitionMs', 0, 2000, 10).name('glide (ms)').onChange(applyPerspective);
+    fVP.add(CONFIG, 'vpXmin', 0, 100, 1).name('VP x min');
+    fVP.add(CONFIG, 'vpXmax', 0, 100, 1).name('VP x max');
+    fVP.add(CONFIG, 'vpYmin', 0, 100, 1).name('VP y min');
+    fVP.add(CONFIG, 'vpYmax', 0, 100, 1).name('VP y max');
+    fVP.add(CONFIG, 'showVpDot').name('show VP marker').onChange(() => setVP(vpX, vpY));
+    fVP.add({ jump: randomizeVP }, 'jump').name('▶ randomize now');
+    fVP.open();
+
+    const fGeo = gui.addFolder('Cube / stick');
+    fGeo.add(CONFIG, 'width', 80, 1200, 5).name('width').onChange(layoutCube);
+    fGeo.add(CONFIG, 'height', 80, 1200, 5).name('height').onChange(layoutCube);
+    fGeo.add(CONFIG, 'depth', 80, 1200, 5).name('depth').onChange(layoutCube);
+    fGeo.add(CONFIG, 'baseRotX', -90, 90, 1).name('tilt X');
+    fGeo.open();
+
+    const fMotion = gui.addFolder('Motion');
+    fMotion.add(CONFIG, 'autoSpin', -90, 90, 1).name('auto spin (°/s)');
+    fMotion.open();
+
+    const fText = gui.addFolder('Text');
+    fText.add(CONFIG, 'fontPx', 10, 160, 1).name('font size').onChange(layoutCube);
+    fText.add(CONFIG, 'letterSpacing', -10, 20, 0.5).name('letter spacing').onChange(layoutCube);
+    fText.open();
+
+    const fLook = gui.addFolder('Look');
+    fLook.add(CONFIG, 'faceOpacity', 0, 0.4, 0.01).name('face fill').onChange(layoutCube);
+    fLook.add(CONFIG, 'borderWidth', 0, 6, 0.5).name('edge width').onChange(layoutCube);
+    fLook.addColor(CONFIG, 'edgeColor').name('edge color').onChange(layoutCube);
+  })();
+  </script>
+</body>
+</html>
