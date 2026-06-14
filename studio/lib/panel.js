@@ -71,6 +71,8 @@
   user-select: text;
 }
 .byo-panel--hidden { display: none; }
+.byo-panel__caret { flex: 0 0 auto; margin-right: 6px; font-size: 9px; color: #888; }
+.byo-panel--collapsed .byo-panel__body { display: none; }
 `;
     const style = document.createElement('style');
     style.id = 'byo-panel-style';
@@ -98,6 +100,11 @@
     const header = document.createElement('div');
     header.className = 'byo-panel__header';
 
+    const caret = document.createElement('span');
+    caret.className = 'byo-panel__caret';
+    caret.textContent = '▾';   // ▾ expanded / ▸ collapsed
+    header.appendChild(caret);
+
     const titleEl = document.createElement('span');
     titleEl.className = 'byo-panel__title';
     titleEl.textContent = title;
@@ -108,6 +115,14 @@
 
     el.appendChild(header);
     el.appendChild(body);
+
+    let collapsed = false;
+    function setCollapsed(c) {
+      collapsed = !!c;
+      el.classList.toggle('byo-panel--collapsed', collapsed);
+      caret.textContent = collapsed ? '▸' : '▾';   // ▸ : ▾
+    }
+    if (opts.collapsed) setCollapsed(true);
 
     // Initial cascade position (overridable via setPosition). Wraps so a long
     // list of panels stays on-screen-ish; the app typically positions them.
@@ -129,13 +144,17 @@
     setPosition(posX, posY);
 
     // --- header drag (pointer events; capture so it tracks outside the panel)
+    // A press that doesn't move past a small threshold is treated as a CLICK
+    // and toggles collapse (so the header doubles as a collapse control).
     let dragging = false, grabDX = 0, grabDY = 0, activePointer = null;
+    let pressX = 0, pressY = 0, moved = false;
 
     function onPointerDown(e) {
       // primary button / touch only; ignore if interacting with body controls
       if (e.button != null && e.button !== 0) return;
       dragging = true;
       activePointer = e.pointerId;
+      pressX = e.clientX; pressY = e.clientY; moved = false;
       const rect = el.getBoundingClientRect();
       grabDX = e.clientX - rect.left;
       grabDY = e.clientY - rect.top;
@@ -147,7 +166,8 @@
     }
     function onPointerMove(e) {
       if (!dragging || (activePointer != null && e.pointerId !== activePointer)) return;
-      setPosition(e.clientX - grabDX, e.clientY - grabDY);
+      if (!moved && Math.abs(e.clientX - pressX) + Math.abs(e.clientY - pressY) > 4) moved = true;
+      if (moved) setPosition(e.clientX - grabDX, e.clientY - grabDY);
     }
     function onPointerUp(e) {
       if (!dragging || (activePointer != null && e.pointerId !== activePointer)) return;
@@ -157,6 +177,7 @@
       if (header.releasePointerCapture) {
         try { header.releasePointerCapture(e.pointerId); } catch (_) {}
       }
+      if (!moved) setCollapsed(!collapsed);   // a click (no drag) toggles collapse
     }
     header.addEventListener('pointerdown', onPointerDown);
     header.addEventListener('pointermove', onPointerMove);
@@ -179,7 +200,11 @@
 
     document.body.appendChild(el);
 
-    const panel = { el, body, show, hide, toggle, setPosition, destroy };
+    const panel = {
+      el, body, show, hide, toggle, setPosition, destroy,
+      collapse() { setCollapsed(true); }, expand() { setCollapsed(false); },
+      toggleCollapse() { setCollapsed(!collapsed); }
+    };
     registry.push(panel);
     return panel;
   }

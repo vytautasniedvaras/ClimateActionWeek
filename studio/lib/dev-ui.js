@@ -101,7 +101,7 @@
     /* =============================================================
        COLOUR panel
        ============================================================= */
-    const colorPanel = BYO.Panel.create({ title: 'Colour', id: 'devui-colour', width: 220 });
+    const colorPanel = BYO.Panel.create({ title: 'Colour', id: 'devui-colour', width: 220, collapsed: true });
     colorPanel.setPosition(16, 16);
     const colorPicker = BYO.ColorPanel.create(colorPanel.body);
 
@@ -142,8 +142,8 @@
     /* =============================================================
        FORMAT panel — family / weight / spacing / variable axes
        ============================================================= */
-    const formatPanel = BYO.Panel.create({ title: 'Format', id: 'devui-format', width: 220 });
-    formatPanel.setPosition(250, 16);
+    const formatPanel = BYO.Panel.create({ title: 'Format', id: 'devui-format', width: 220, collapsed: true });
+    formatPanel.setPosition(244, 16);
 
     const fontEntries = (BYO.Fonts ? BYO.Fonts.DISPLAY.concat(BYO.Fonts.PARAGRAPH) : []);
     const famRow = row('Font');
@@ -286,8 +286,8 @@
        LAYOUT panel — free 2D placement (X/Y/Width %), z-order + docking
        (reflects live handle drags; X/Y/W are % of the viewport)
        ============================================================= */
-    const layoutPanel = BYO.Panel.create({ title: 'Layout', id: 'devui-layout', width: 220 });
-    layoutPanel.setPosition(16, 320);
+    const layoutPanel = BYO.Panel.create({ title: 'Layout', id: 'devui-layout', width: 220, collapsed: true });
+    layoutPanel.setPosition(16, 52);
 
     const xRow = row('X %'); const xInput = numInput(0, 0.5); xRow.appendChild(xInput); layoutPanel.body.appendChild(xRow);
     const yRow = row('Y %'); const yInput = numInput(0, 0.5); yRow.appendChild(yInput); layoutPanel.body.appendChild(yRow);
@@ -353,8 +353,8 @@
          edge       -> active.warp.surfaceOpts.facingCut
          spin       -> active.warp.config.slowSpin  (idle coast speed)
        ============================================================= */
-    const warpPanel = BYO.Panel.create({ title: 'Warp', id: 'devui-warp', width: 220 });
-    warpPanel.setPosition(250, 320);
+    const warpPanel = BYO.Panel.create({ title: 'Warp', id: 'devui-warp', width: 220, collapsed: true });
+    warpPanel.setPosition(244, 52);
 
     const warpToggle = button('Enable warp');
     warpPanel.body.appendChild(warpToggle);
@@ -512,8 +512,8 @@
     /* =============================================================
        TEXTURE panel — the sample media lives HERE (not page furniture)
        ============================================================= */
-    const texturePanel = BYO.Panel.create({ title: 'Texture', id: 'devui-texture', width: 260 });
-    texturePanel.setPosition(16, 560);
+    const texturePanel = BYO.Panel.create({ title: 'Texture', id: 'devui-texture', width: 260, collapsed: true });
+    texturePanel.setPosition(16, 88);
 
     let textureWindow = null;
     const initialSource = srcObj.video || srcObj.img || null;
@@ -553,8 +553,8 @@
        EFFECTS panel — word-replacement effects on the single selected word
        (scrub / auto-cycle) + an editable replacements list (text + colour).
        ============================================================= */
-    effectsPanel = BYO.Panel.create({ title: 'Effects', id: 'devui-effects', width: 240 });
-    effectsPanel.setPosition(250, 560);
+    effectsPanel = BYO.Panel.create({ title: 'Effects', id: 'devui-effects', width: 240, collapsed: true });
+    effectsPanel.setPosition(244, 88);
     const fxBody = document.createElement('div');
     effectsPanel.body.appendChild(fxBody);
 
