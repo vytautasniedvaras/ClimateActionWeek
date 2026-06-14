@@ -27,6 +27,9 @@
   window.BYO = window.BYO || {};
 
   const SS = 2;            // warp raster supersample (rect * dpr * SS) — kills pixelation
+  // the warp overlay extends this fraction of the box beyond each edge so the
+  // displaced cube AND the transform gizmo aren't clipped at the box bounds.
+  const WARP_OVERSCAN = 0.9;
   let _seq = 0;            // unique id per component (for scoped styles / ids)
   let _stylesInjected = false;
 
@@ -113,9 +116,10 @@
 .byo-textcomp__chrome--dragging .byo-textcomp__readout { display: block; }
 .byo-textcomp.byo-textcomp--warped .byo-word { visibility: hidden; }
 .byo-textcomp__warphost {
-  position: fixed;
+  position: absolute;     /* document coords -> scrolls WITH the text box (not fixed) */
   z-index: 40;
   pointer-events: none;   /* gizmo binds window listeners; overlay never eats clicks */
+  overflow: visible;
 }
 `;
     const el = document.createElement('style');
@@ -956,17 +960,24 @@
       this.isWarped = false;
     }
 
-    // size + position the fixed overlay host EXACTLY over the component rect
+    // overscan margin (CSS px) added around the box so the displaced cube +
+    // gizmo have room and aren't clipped at the box edges.
+    _warpMargin(r) {
+      return { mx: Math.round(r.width * WARP_OVERSCAN), my: Math.round(r.height * WARP_OVERSCAN) };
+    }
+
+    // size + position the overlay host over the component rect PLUS the overscan
+    // margin, in DOCUMENT coords (position:absolute) so it scrolls with the box.
     _positionWarpHost() {
       if (!this._warpHost) return;
       const r = this.el.getBoundingClientRect();
-      // round to whole CSS px so the overlay aligns pixel-perfect with the flat
-      // component (getBoundingClientRect returns floats -> 0.5-1px drift otherwise)
+      const m = this._warpMargin(r);
+      const sx = window.pageXOffset || 0, sy = window.pageYOffset || 0;
       Object.assign(this._warpHost.style, {
-        left: Math.round(r.left) + 'px',
-        top: Math.round(r.top) + 'px',
-        width: Math.max(1, Math.round(r.width)) + 'px',
-        height: Math.max(1, Math.round(r.height)) + 'px',
+        left: Math.round(r.left + sx - m.mx) + 'px',
+        top: Math.round(r.top + sy - m.my) + 'px',
+        width: Math.max(1, Math.round(r.width + 2 * m.mx)) + 'px',
+        height: Math.max(1, Math.round(r.height + 2 * m.my)) + 'px',
         // mirror the component's z so warped boxes layer in the same order
         zIndex: String(40 + (this.z || 0))
       });
@@ -979,10 +990,11 @@
     _rasterizeIntoWarp() {
       if (!this.warp) return;
       const r = this.el.getBoundingClientRect();
+      const m = this._warpMargin(r);   // canvas matches the OVERSCANNED host
       const dpr = window.devicePixelRatio || 1;
       const scale = dpr * SS;
-      const W = Math.max(1, Math.round(r.width * scale));
-      const H = Math.max(1, Math.round(r.height * scale));
+      const W = Math.max(1, Math.round((r.width + 2 * m.mx) * scale));
+      const H = Math.max(1, Math.round((r.height + 2 * m.my) * scale));
 
       let cv = this._warpCanvas;
       const fresh = !cv || cv.width !== W || cv.height !== H;
@@ -1022,10 +1034,12 @@
         // exact hex (no rgb round-trip loss) when set; else normalized computed
         const col = w.dataset.color || cssColorToHex(cs.color);
         ctx.fillStyle = col;
-        const x = wr.left - compRect.left;
+        // offset by the overscan margin so the text sits in the box region at
+        // the CENTRE of the (larger) canvas — aligned with the flat box.
+        const x = (wr.left - compRect.left) + m.mx;
         // approximate baseline: top + ascent (~0.8 of font-size)
         const fs = parseFloat(fontSize) || 16;
-        const y = (wr.top - compRect.top) + fs * 0.8;
+        const y = (wr.top - compRect.top) + m.my + fs * 0.8;
         ctx.fillText(t, x, y);
       });
 
