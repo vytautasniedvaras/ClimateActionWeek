@@ -139,7 +139,16 @@
     _faceNormal(id) { const f = FACES[id]; return AXV[f.ax].clone().multiplyScalar(f.s).applyQuaternion(this.model.quaternion).normalize(); }
     // reposition the 6 face groups to their current face-centres (gizmo-local, ride faceOffset)
     _placeFaces() { for (const id in this._faces) { const f = FACES[id]; this._faces[id].position.copy(AXV[f.ax]).multiplyScalar(f.s * (BASE + (this.model.faceOffset[id] || 0))); } }
-    _setNdcRay(cx, cy) { this._ndc.set((cx / innerWidth) * 2 - 1, -(cy / innerHeight) * 2 + 1); this._ray.setFromCamera(this._ndc, this.stage.camera); }  // ray helpers
+    // NDC must be relative to the RENDERER CANVAS rect, not the whole window:
+    // in the studio the warp renders into a sub-rect overlay, so window-relative
+    // NDC would mis-map every pick. (For a full-window canvas this is identical.)
+    _setNdcRay(cx, cy) {
+      const el = this.stage && this.stage.renderer && this.stage.renderer.domElement;
+      const r = el && el.getBoundingClientRect ? el.getBoundingClientRect() : { left: 0, top: 0, width: innerWidth, height: innerHeight };
+      const w = r.width || innerWidth, h = r.height || innerHeight;
+      this._ndc.set(((cx - r.left) / w) * 2 - 1, -((cy - r.top) / h) * 2 + 1);
+      this._ray.setFromCamera(this._ndc, this.stage.camera);
+    }
     _rayPlane(origin, normal, out) { this._plane.setFromNormalAndCoplanarPoint(normal, origin); return this._ray.ray.intersectPlane(this._plane, out); }
     // closest-approach distance from ray to a world point, in gizmo-local units
     _rayPointDist(wp) {
