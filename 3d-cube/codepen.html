@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BYO — Cube</title>
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: #ffffff;
+      overflow: hidden;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial;
+      cursor: pointer;
+    }
+    #scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+    .hint {
+      position: fixed; left: 14px; bottom: 12px;
+      font-size: 12px; letter-spacing: 0.02em; color: #9aa0a6;
+      user-select: none; pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div class="hint">move horizontally over a line to change its words · move between lines to turn the slabs</div>
+
+  <!-- three.js + dat.GUI (UMD builds, expose globals — work over file://) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
+  <script>
+    // Inlined word pairings (self-contained for CodePen)
+    window.WORD_DATA = {
+      verbs: [
+        "facilitate", "contribute to", "reconfigure", "transform", "translate",
+        "communicate", "support", "challenge", "innovate", "decolonise"
+      ],
+      nouns: [
+        { word: "BEAMER",         plural: "BEAMERS",        verbs: ["facilitate", "support", "communicate", "translate", "contribute to"] },
+        { word: "SYNTHS",         plural: "SYNTHS",         verbs: ["communicate", "translate", "transform", "contribute to"] },
+        { word: "MIXER",          plural: "MIXERS",         verbs: ["reconfigure", "transform", "facilitate", "support"] },
+        { word: "CABLES",         plural: "CABLES",         verbs: ["support", "facilitate", "contribute to", "reconfigure"] },
+        { word: "INSTRUMENT",     plural: "INSTRUMENTS",    verbs: ["facilitate", "support", "communicate", "translate", "contribute to"] },
+        { word: "SPEAKER",        plural: "SPEAKERS",       verbs: ["communicate", "translate", "facilitate", "support"] },
+        { word: "LAPTOP",         plural: "LAPTOPS",        verbs: ["facilitate", "support", "communicate", "contribute to"] },
+        { word: "AMP",            plural: "AMPS",           verbs: ["support", "facilitate", "transform"] },
+        { word: "LASER",          plural: "LASERS",         verbs: ["transform", "reconfigure", "communicate", "innovate"] },
+        { word: "LIGHTS",         plural: "LIGHTS",         verbs: ["communicate", "transform", "facilitate", "support"] },
+        { word: "CAMERA",         plural: "CAMERAS",        verbs: ["communicate", "translate", "support", "contribute to"] },
+        { word: "IDEAS",          plural: "IDEAS",          verbs: ["transform", "challenge", "reconfigure", "communicate", "innovate", "contribute to", "decolonise"] },
+        { word: "KNOWLEDGE",      plural: "KNOWLEDGE",      verbs: ["transform", "challenge", "communicate", "translate", "decolonise", "contribute to", "reconfigure"] },
+        { word: "PRACTICE",       plural: "PRACTICES",      verbs: ["reconfigure", "transform", "challenge", "support", "decolonise"] },
+        { word: "VISION",         plural: "VISIONS",        verbs: ["communicate", "transform", "challenge", "innovate", "translate"] },
+        { word: "FUTURES",        plural: "FUTURES",        verbs: ["reconfigure", "transform", "challenge", "innovate", "decolonise"] },
+        { word: "ACT",            plural: "ACTS",           verbs: ["transform", "challenge", "support", "contribute to"] },
+        { word: "CONCEPT",        plural: "CONCEPTS",       verbs: ["communicate", "translate", "transform", "challenge", "reconfigure"] },
+        { word: "ART",            plural: "ARTS",           verbs: ["communicate", "translate", "transform", "challenge", "decolonise", "innovate"] },
+        { word: "FOG MACHINE",    plural: "FOG MACHINES",   verbs: ["transform", "reconfigure", "facilitate", "support"] },
+        { word: "ROBOT",          plural: "ROBOTS",         verbs: ["facilitate", "support", "transform", "innovate", "reconfigure"] },
+        { word: "LIGHTSABER",     plural: "LIGHTSABERS",    verbs: ["challenge", "transform", "innovate"] },
+        { word: "PAINTBRUSH",     plural: "PAINTBRUSHES",   verbs: ["communicate", "translate", "transform", "contribute to"] },
+        { word: "FIELD NOTES",    plural: "FIELD NOTES",    verbs: ["communicate", "translate", "contribute to", "support"] },
+        { word: "RESEARCH DATA",  plural: "RESEARCH DATA",  verbs: ["transform", "communicate", "translate", "contribute to", "support", "challenge"] },
+        { word: "PERSPECTIVE",    plural: "PERSPECTIVES",   verbs: ["reconfigure", "transform", "challenge", "communicate", "decolonise", "translate"] },
+        { word: "ENTHUSIASM",     plural: "ENTHUSIASM",     verbs: ["support", "facilitate", "transform", "communicate", "contribute to"] },
+        { word: "PURPOSE",        plural: "PURPOSES",       verbs: ["transform", "challenge", "support", "reconfigure", "contribute to"] },
+        { word: "AGENDA",         plural: "AGENDAS",        verbs: ["reconfigure", "transform", "challenge", "decolonise", "support"] },
+        { word: "URGENCY",        plural: "URGENCY",        verbs: ["communicate", "transform", "challenge", "support", "facilitate"] },
+        { word: "COMMITMENT",     plural: "COMMITMENTS",    verbs: ["support", "transform", "challenge", "contribute to", "facilitate"] },
+        { word: "QUESTION",       plural: "QUESTIONS",      verbs: ["challenge", "reconfigure", "transform", "communicate", "decolonise"] },
+        { word: "INQUIRY",        plural: "INQUIRIES",      verbs: ["facilitate", "support", "transform", "challenge", "decolonise", "contribute to"] },
+        { word: "FUTURE",         plural: "FUTURES",        verbs: ["reconfigure", "transform", "challenge", "innovate", "decolonise"] },
+        { word: "STRATEGY",       plural: "STRATEGIES",     verbs: ["reconfigure", "transform", "facilitate", "support", "innovate", "contribute to"] },
+        { word: "CLIMATE ACTION", plural: "CLIMATE ACTION", verbs: ["facilitate", "support", "transform", "challenge", "contribute to", "innovate"] }
+      ]
+    };
+  </script>
+  <script>
+  (function () {
+
+    /* ================================================================
+       CONFIG — also editable live via the GUI panel (top-right)
+       ================================================================ */
+    const CONFIG = {
+      // geometry
+      cubeWidth:  4.4,     // cube width & depth (square column)
+      cubeHeight: 3.9,     // total height of the 3 stacked slabs
+      lineSpacing: 0.0,    // extra vertical gap between slabs (world units)
+
+      // text
+      fontScale:       0.82,   // font size as a fraction of a slab's height
+      letterSpacingEm: -0.05,  // negative = tighter letters
+      faceResolution:  1024,   // per-face texture width (px)
+
+      // motion / speeds
+      easeFactor:    0.12,                   // how fast the active slab settles facing you
+      groupIdleSpin: 0.0,                    // slow turn applied to the WHOLE cube
+      slabSpin0:     0.014,                  // turn speed of slab 1 when not active
+      slabSpin1:    -0.018,                  // slab 2
+      slabSpin2:     0.022,                  // slab 3
+      gestureThreshold: 45,                  // px of horizontal travel to change a word
+
+      // look
+      glassOpacity:   0.05,
+      edgeOpacity:    0.6
+    };
+    const GLASS_COLOR = 0x6fa8d8, EDGE_COLOR = 0xbfc6cc;
+    /* ================================================================ */
+
+    const data = window.WORD_DATA;
+    const nouns = data.nouns;
+
+    // ---------- SDG colour palette ----------
+    const sdgColors = [
+      '#E5233D', '#DDA73A', '#4CA146', '#C5192D', '#EF402C', '#27BFE6',
+      '#FBC412', '#A31C44', '#F26A2D', '#E01483', '#F89D2A', '#BF8D2C',
+      '#407F46', '#1F97D4', '#59BA48', '#126A9F', '#13496B'
+    ];
+    const randColor = () => sdgColors[Math.floor(Math.random() * sdgColors.length)];
+    const contrast = ex => { const a = sdgColors.filter(c => c !== ex); return a[Math.floor(Math.random() * a.length)]; };
+
+    // ---------- content state ----------
+    let nounIndex = 0, verbIndex = 0;
+    let nounColor = randColor(), verbColor = contrast(nounColor);
+
+    // ---------- derived dimensions (recomputed on geometry changes) ----------
+    let L, CUBE_H, SLICE, positionsY, WF, HF, WM, FONT_PX, LETTER_SP, fontStr;
+    function deriveDims() {
+      L = CONFIG.cubeWidth;
+      CUBE_H = CONFIG.cubeHeight;
+      SLICE = CUBE_H / 3;
+      const step = SLICE + CONFIG.lineSpacing;
+      positionsY = [step, 0, -step];
+      WF = CONFIG.faceResolution;
+      HF = Math.round(WF * SLICE / L);
+      WM = WF * 4;
+      deriveFont();
+    }
+    function deriveFont() {
+      FONT_PX = Math.round(HF * CONFIG.fontScale);
+      LETTER_SP = `${(FONT_PX * CONFIG.letterSpacingEm).toFixed(2)}px`;
+      fontStr = `800 ${FONT_PX}px Inter, Arial, sans-serif`;
+    }
+
+    // ---------- text canvases (perimeter master + 4 face crops per line) ----------
+    let lineTex = [];
+    function makeTextures() {
+      lineTex = [];
+      for (let i = 0; i < 3; i++) {
+        const master = document.createElement('canvas');
+        master.width = WM; master.height = HF;
+        const mctx = master.getContext('2d');
+        const faces = [];
+        for (let k = 0; k < 4; k++) {
+          const c = document.createElement('canvas');
+          c.width = WF; c.height = HF;
+          const tex = new THREE.CanvasTexture(c);
+          tex.anisotropy = 8; tex.minFilter = THREE.LinearFilter;
+          faces.push({ canvas: c, ctx: c.getContext('2d'), tex });
+        }
+        lineTex.push({ master, mctx, faces });
+      }
+    }
+
+    // contiguous source windows around the column (wraps at WM): left, front, right, back
+    function srcStart(name) { return ({ front: 1.5, right: 2.5, back: 3.5, left: 0.5 }[name]) * WF; }
+
+    function drawLine(idx, segs) {
+      const L0 = lineTex[idx];
+      const { mctx } = L0;
+      mctx.clearRect(0, 0, WM, HF);
+      mctx.font = fontStr;
+      if ('letterSpacing' in mctx) mctx.letterSpacing = LETTER_SP;
+      mctx.textBaseline = 'middle';
+      mctx.textAlign = 'left';
+      const total = segs.reduce((w, s) => w + mctx.measureText(s.text).width, 0);
+      let x = (WM - total) / 2;
+      for (const seg of segs) {
+        mctx.fillStyle = seg.color;
+        mctx.fillText(seg.text, x, HF / 2 + 3);
+        x += mctx.measureText(seg.text).width;
+      }
+      ['front', 'right', 'back', 'left'].forEach((name, k) => {
+        const f = L0.faces[k];
+        f.ctx.clearRect(0, 0, WF, HF);
+        const start = srcStart(name);
+        const first = Math.min(WF, WM - start);
+        f.ctx.drawImage(L0.master, start, 0, first, HF, 0, 0, first, HF);
+        if (first < WF) f.ctx.drawImage(L0.master, 0, 0, WF - first, HF, first, 0, WF - first, HF);
+        f.tex.needsUpdate = true;
+      });
+    }
+
+    function relayout() {
+      const n = nouns[nounIndex];
+      const verb = n.verbs[verbIndex % n.verbs.length].toUpperCase();
+      drawLine(0, [{ text: 'BYO ', color: '#000' }, { text: n.word, color: nounColor }]);
+      drawLine(1, [{ text: 'HOW CAN ', color: '#000' }, { text: n.plural, color: nounColor }]);
+      drawLine(2, [{ text: verb + ' ', color: verbColor }, { text: 'SCIENCE', color: '#000' }]);
+    }
+    function cycleNoun() {
+      nounIndex = (nounIndex + 1) % nouns.length;
+      nounColor = randColor(); verbIndex = 0; verbColor = contrast(nounColor);
+      relayout();
+    }
+    function cycleVerb() {
+      verbIndex = (verbIndex + 1) % nouns[nounIndex].verbs.length;
+      verbColor = contrast(nounColor);
+      relayout();
+    }
+
+    // ---------- three.js scene ----------
+    const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('scene'), antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+    camera.position.set(0, 0, 8);
+    camera.lookAt(0, 0, 0);
+
+    const group = new THREE.Group();
+    scene.add(group);
+
+    // each SLAB is one self-contained unit: its own glass box + its 4 text faces,
+    // so text is glued to the slab and they always rotate together.
+    const HALF = Math.PI / 2;
+    const faceDefs = [
+      { p: [0, 0,  0.5], rotY: 0 },        // front  (z = +L/2)
+      { p: [ 0.5, 0, 0], rotY:  HALF },    // right  (x = +L/2)
+      { p: [0, 0, -0.5], rotY: Math.PI },  // back
+      { p: [-0.5, 0, 0], rotY: -HALF }     // left
+    ];
+    let slabGroups = [], glassMats = [], edgeMats = [];
+
+    function clearGroup() {
+      while (group.children.length) {
+        const c = group.children.pop();
+        c.traverse && c.traverse(o => { o.geometry && o.geometry.dispose && o.geometry.dispose(); });
+        group.remove(c);
+      }
+    }
+
+    function buildScene() {
+      clearGroup();
+      slabGroups = []; glassMats = []; edgeMats = [];
+      const boxGeo = new THREE.BoxGeometry(L, SLICE, L);
+      const planeGeo = new THREE.PlaneGeometry(L, SLICE);
+      for (let i = 0; i < 3; i++) {
+        const slab = new THREE.Group();
+        slab.position.y = positionsY[i];
+
+        const gMat = new THREE.MeshBasicMaterial({ color: GLASS_COLOR, transparent: true, opacity: CONFIG.glassOpacity, side: THREE.DoubleSide, depthWrite: false });
+        slab.add(new THREE.Mesh(boxGeo, gMat));
+        glassMats.push(gMat);
+
+        const eMat = new THREE.LineBasicMaterial({ color: EDGE_COLOR, transparent: true, opacity: CONFIG.edgeOpacity });
+        slab.add(new THREE.LineSegments(new THREE.EdgesGeometry(boxGeo), eMat));
+        edgeMats.push(eMat);
+
+        faceDefs.forEach((f, k) => {
+          const mat = new THREE.MeshBasicMaterial({ map: lineTex[i].faces[k].tex, transparent: true, side: THREE.DoubleSide, depthWrite: false });
+          const mesh = new THREE.Mesh(planeGeo, mat);
+          mesh.position.set(f.p[0] * L, f.p[1], f.p[2] * L);
+          mesh.rotation.y = f.rotY;
+          slab.add(mesh);
+        });
+
+        group.add(slab);
+        slabGroups.push(slab);
+      }
+    }
+
+    function rebuildAll() { deriveDims(); makeTextures(); buildScene(); relayout(); }
+    rebuildAll();
+
+    // ---------- interaction ----------
+    let activeLine = 0;
+    let lastX = [0, 0, 0], lastY = 0;
+    const lineFromY = y => { const t = y / window.innerHeight; return t < 1 / 3 ? 0 : (t < 2 / 3 ? 1 : 2); };
+
+    function handleMove(cx, cy) {
+      activeLine = lineFromY(cy);
+      const dx = cx - lastX[activeLine], dy = cy - lastY;
+      if (Math.abs(dx) > CONFIG.gestureThreshold && Math.abs(dx) > Math.abs(dy)) {
+        if (activeLine === 2) cycleVerb(); else cycleNoun();
+        lastX[activeLine] = cx;
+      }
+      lastY = cy;
+    }
+    window.addEventListener('mousemove', e => handleMove(e.clientX, e.clientY));
+    window.addEventListener('touchmove', e => { e.preventDefault(); const t = e.touches[0]; handleMove(t.clientX, t.clientY); }, { passive: false });
+
+    // ---------- render loop ----------
+    const TWO_PI = Math.PI * 2;
+    function animate() {
+      requestAnimationFrame(animate);
+      group.rotation.y += CONFIG.groupIdleSpin;
+      const spins = [CONFIG.slabSpin0, CONFIG.slabSpin1, CONFIG.slabSpin2];
+      for (let i = 0; i < 3; i++) {
+        const s = slabGroups[i];
+        if (i === activeLine) {
+          const desired = -group.rotation.y;                         // face camera in world space
+          const target = desired + Math.round((s.rotation.y - desired) / TWO_PI) * TWO_PI;
+          s.rotation.y += (target - s.rotation.y) * CONFIG.easeFactor;
+        } else {
+          s.rotation.y += spins[i];                                  // each slab turns on its own
+        }
+      }
+      renderer.render(scene, camera);
+    }
+
+    // ---------- resize ----------
+    function resize() {
+      const w = window.innerWidth, h = window.innerHeight;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.position.z = w / h < 1 ? 11.5 : 8;
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener('resize', resize);
+    resize();
+    animate();
+
+    // ---------- GUI ----------
+    const gui = new dat.GUI({ width: 300 });
+    const updateText = () => { deriveFont(); relayout(); };
+    const updatePositions = () => {
+      const step = SLICE + CONFIG.lineSpacing;
+      positionsY = [step, 0, -step];
+      slabGroups.forEach((s, i) => s.position.y = positionsY[i]);
+    };
+    const updateLook = () => {
+      glassMats.forEach(m => m.opacity = CONFIG.glassOpacity);
+      edgeMats.forEach(m => m.opacity = CONFIG.edgeOpacity);
+    };
+
+    const fText = gui.addFolder('Text');
+    fText.add(CONFIG, 'fontScale', 0.3, 1.6, 0.01).name('font scale').onChange(updateText);
+    fText.add(CONFIG, 'letterSpacingEm', -0.2, 0.3, 0.005).name('letter spacing').onChange(updateText);
+    fText.open();
+
+    const fGeo = gui.addFolder('Geometry');
+    fGeo.add(CONFIG, 'cubeWidth', 2, 9, 0.1).name('width / depth').onChange(rebuildAll);
+    fGeo.add(CONFIG, 'cubeHeight', 2, 9, 0.1).name('height').onChange(rebuildAll);
+    fGeo.add(CONFIG, 'lineSpacing', -0.5, 2.5, 0.01).name('line spacing').onChange(updatePositions);
+    fGeo.open();
+
+    const fMotion = gui.addFolder('Motion');
+    fMotion.add(CONFIG, 'easeFactor', 0.02, 0.4, 0.01).name('settle ease');
+    fMotion.add(CONFIG, 'groupIdleSpin', 0, 0.02, 0.0005).name('whole-cube spin');
+    fMotion.add(CONFIG, 'slabSpin0', -0.06, 0.06, 0.001).name('slab 1 spin');
+    fMotion.add(CONFIG, 'slabSpin1', -0.06, 0.06, 0.001).name('slab 2 spin');
+    fMotion.add(CONFIG, 'slabSpin2', -0.06, 0.06, 0.001).name('slab 3 spin');
+    fMotion.add(CONFIG, 'gestureThreshold', 5, 150, 1).name('change threshold');
+    fMotion.open();
+
+    const fLook = gui.addFolder('Look');
+    fLook.add(CONFIG, 'glassOpacity', 0, 0.5, 0.01).name('glass opacity').onChange(updateLook);
+    fLook.add(CONFIG, 'edgeOpacity', 0, 1, 0.01).name('edge opacity').onChange(updateLook);
+  })();
+  </script>
+</body>
+</html>
