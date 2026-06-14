@@ -33,6 +33,7 @@
       // --- the invisible cube ---
       cubeSize:      1.15,   // base half-extent of the cube (world units; the gizmo scales on top)
       strength:      1.35,   // how far the text is pushed onto the cube's front faces
+      maxLift:       2.6,    // clamp on the forward push (keeps big scales from flinging text at the camera)
       edgeBand:      0.6,    // seam width where projected text eases back to flat
       facingCut:     0.2,    // drop triangles steeper than this (kills the edge-on glow; keeps colour flat)
 
@@ -47,6 +48,9 @@
 
       // --- word interaction ---
       wordThreshold: 55,     // px of horizontal travel over a line to change its word
+
+      // --- quality ---
+      renderScale:   1.5,    // super-sampling factor (higher = crisper, costs GPU)
 
       // --- text (auto-shrinks per line so it always fits the width) ---
       texResolution: 3072,   // width in px of the rendered text texture (higher = sharper)
@@ -88,9 +92,13 @@
     const texCanvas = document.createElement('canvas');
     const tctx = texCanvas.getContext('2d');
     const texture = new THREE.CanvasTexture(texCanvas);
-    texture.minFilter = THREE.LinearFilter;      // no mip-maps -> no transparent-edge bleeding
+    // trilinear + anisotropic filtering removes the glyph-edge aliasing when the
+    // projection minifies/tilts the text. premultiplyAlpha keeps mip-map edges
+    // from bleeding (no dark halo on the transparent border).
+    texture.premultiplyAlpha = true;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
     texture.magFilter = THREE.LinearFilter;
-    texture.generateMipmaps = false;
+    texture.generateMipmaps = true;
     texture.wrapS = texture.wrapT = THREE.ClampToEdgeWrapping;
 
     function sizeTextCanvas() {
@@ -107,7 +115,7 @@
       const n    = nouns[nounIndex];
       const verb = n.verbs[verbIndex % n.verbs.length].toUpperCase();
       const lines = [
-        [ { t: 'BYO ',     c: '#000' }, { t: n.word,   c: nounColor } ],
+        [ { t: 'BYO',      c: '#000' }, { t: n.word,   c: nounColor } ],
         [ { t: 'HOW CAN ', c: '#000' }, { t: n.plural, c: nounColor } ],
         [ { t: verb + ' ', c: verbColor }, { t: 'SCIENCE', c: '#000' } ]
       ];
@@ -175,10 +183,17 @@
     // ================================================================
     //  THREE.JS SCENE
     // ================================================================
-    const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('scene'), antialias: true, alpha: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    const canvasEl = document.getElementById('scene');
+    const gl2 = canvasEl.getContext('webgl2', { antialias: true, alpha: true, premultipliedAlpha: true });
+    const renderer = new THREE.WebGLRenderer(gl2
+      ? { canvas: canvasEl, context: gl2, antialias: true, alpha: true }
+      : { canvas: canvasEl, antialias: true, alpha: true });
     const MAX_ANISO = renderer.capabilities.getMaxAnisotropy();
     texture.anisotropy = MAX_ANISO;
+    function applyPixelRatio() {
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2) * CONFIG.renderScale);
+    }
+    applyPixelRatio();
 
     const scene  = new THREE.Scene();
     const CAM_FOV = 45, CAM_DIST = 6;
@@ -206,6 +221,7 @@
       uniform vec3  uHalf;      // cube half-extents (before the gizmo scale)
       uniform float uStrength;
       uniform float uEdgeBand;
+      uniform float uMaxLift;
       varying vec2  vUv;
       varying vec3  vWorld;
 
@@ -234,7 +250,8 @@
         if (thi > tlo) {
           float chord = thi - tlo;
           float mask  = smoothstep(0.0, uEdgeBand, chord);
-          z = mix(wp.z, thi * uStrength, mask);
+          float lift  = min(thi * uStrength, uMaxLift);   // clamp so big scales don't fling text forward
+          z = mix(wp.z, lift, mask);
         }
 
         vUv = uv;
@@ -268,6 +285,7 @@
       uTex:      { value: texture },
       uCamPos:   { value: new THREE.Vector3(0, 0, CAM_DIST) },
       uFacingCut:{ value: CONFIG.facingCut },
+      uMaxLift:  { value: CONFIG.maxLift },
       uCubeInv:  { value: new THREE.Matrix4() },
       uHalf:     { value: new THREE.Vector3(CONFIG.cubeSize, CONFIG.cubeSize, CONFIG.cubeSize) },
       uStrength: { value: CONFIG.strength },
@@ -317,7 +335,6 @@
         baseQuat.copy(cube.quaternion);
         baseScale.copy(cube.scale);
         motionSpin.identity();
-        nextGizmoMode();          // after a finished drag-drop, switch to the next widget
       }
     });
 
@@ -394,8 +411,8 @@
       if (line < 0 || Math.abs(vx) <= Math.abs(vy)) return;   // need horizontal-dominant motion on a line
       gAccum += vx;
       if (Math.abs(gAccum) > CONFIG.wordThreshold) {
-        if (line === 2) userChangeVerb();            // verb line — independent
-        else            userChangeNoun();            // noun + plural lines — linked
+        if (line === 2) cycleVerb();                 // verb line — independent
+        else            cycleNoun();                 // noun + plural lines — linked
         gAccum = 0;
       }
     }
@@ -404,25 +421,19 @@
     //  INTERACTION
     // ================================================================
     // every word change also switches the gizmo to a different widget
-    const GIZMO_MODES = ['translate', 'rotate', 'scale'];
-    let modeIdx = 2;                                   // start on scale
-    function nextGizmoMode() { modeIdx = (modeIdx + 1) % 3; tc.setMode(GIZMO_MODES[modeIdx]); }
-
-    function userChangeNoun() { cycleNoun(); nextGizmoMode(); }
-    function userChangeVerb() { cycleVerb(); nextGizmoMode(); }
-
     // change words on click — but ignore clicks that were gizmo drags
     let suppressClick = false;
     tc.addEventListener('mouseDown', () => { suppressClick = true; });
     window.addEventListener('click', () => {
       if (dragging || suppressClick) { suppressClick = false; return; }
-      userChangeNoun();
+      cycleNoun();
     });
 
+    // Blender-style gizmo shortcuts: G = grab/move, R = rotate, S = scale
     window.addEventListener('keydown', (e) => {
-      if (e.key === 'w' || e.key === 'W') { modeIdx = 0; tc.setMode('translate'); }
-      else if (e.key === 'e' || e.key === 'E') { modeIdx = 1; tc.setMode('rotate'); }
-      else if (e.key === 'r' || e.key === 'R') { modeIdx = 2; tc.setMode('scale'); }
+      if (e.key === 'g' || e.key === 'G') tc.setMode('translate');
+      else if (e.key === 'r' || e.key === 'R') tc.setMode('rotate');
+      else if (e.key === 's' || e.key === 'S') tc.setMode('scale');
       else if (e.key === 'h' || e.key === 'H') toggleGui();
       else if (e.code === 'Space') { CONFIG.paused = !CONFIG.paused; e.preventDefault(); }
     });
@@ -437,7 +448,7 @@
 
       if (CONFIG.autoCycle > 0 && !CONFIG.paused) {
         animate._t = (animate._t || 0) + dt;
-        if (animate._t >= CONFIG.autoCycle) { animate._t = 0; userChangeNoun(); }
+        if (animate._t >= CONFIG.autoCycle) { animate._t = 0; cycleNoun(); }
       }
 
       const { vx, vy } = mouseVelocity();
@@ -449,6 +460,7 @@
       uniforms.uStrength.value = CONFIG.strength;
       uniforms.uEdgeBand.value = CONFIG.edgeBand;
       uniforms.uFacingCut.value = CONFIG.facingCut;
+      uniforms.uMaxLift.value = CONFIG.maxLift;
 
       renderer.render(scene, camera);
     }
@@ -458,6 +470,7 @@
     // ================================================================
     function resize() {
       const w = window.innerWidth, h = window.innerHeight;
+      applyPixelRatio();
       renderer.setSize(w, h, false);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
@@ -488,6 +501,7 @@
     const fCube = gui.addFolder('Invisible cube');
     fCube.add(CONFIG, 'cubeSize', 0.4, 2.4, 0.01).name('size').onChange(buildGuide);
     fCube.add(CONFIG, 'strength', 0.5, 3.5, 0.01).name('projection depth');
+    fCube.add(CONFIG, 'maxLift', 0.5, 4.0, 0.05).name('max forward push');
     fCube.add(CONFIG, 'edgeBand', 0.05, 1.5, 0.01).name('seam softness');
     fCube.add(CONFIG, 'facingCut', 0.0, 0.6, 0.01).name('edge cutoff');
     fCube.add(CONFIG, 'showGuide').name('show guide + gizmo').onChange(v => {
@@ -517,10 +531,11 @@
         cube.position.set(0, 0, 0); cube.quaternion.identity(); cube.scale.set(1, 1, 1);
       }
     };
-    fGizmo.add(gizmoActions, 'move').name('move (W)');
-    fGizmo.add(gizmoActions, 'rotate').name('rotate (E)');
-    fGizmo.add(gizmoActions, 'scale').name('scale (R)');
+    fGizmo.add(gizmoActions, 'move').name('move (G)');
+    fGizmo.add(gizmoActions, 'rotate').name('rotate (R)');
+    fGizmo.add(gizmoActions, 'scale').name('scale (S)');
     fGizmo.add(gizmoActions, 'reset').name('reset transform');
+    fGizmo.open();
 
     const fText = gui.addFolder('Text');
     fText.add(CONFIG, 'texResolution', 1024, 8192, 256).name('texture res (px)').onChange(rebuildTexture);
@@ -531,6 +546,10 @@
     fText.add(CONFIG, 'lineSpacing', 0.7, 1.6, 0.01).name('line spacing').onChange(drawText);
     fText.add(CONFIG, 'autoCycle', 0, 6, 0.5).name('auto-change (s)');
     fText.open();
+
+    const fQual = gui.addFolder('Quality');
+    fQual.add(CONFIG, 'renderScale', 1.0, 2.5, 0.25).name('super-sampling').onChange(() => { applyPixelRatio(); resize(); });
+    fQual.open();
   })();
   </script>
 </body>
