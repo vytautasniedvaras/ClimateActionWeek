@@ -78,6 +78,11 @@
     el.textContent = text;
     el.style.cssText = 'width:100%;padding:4px;margin:2px 0;font:inherit;cursor:pointer;' +
       'border:1px solid #ccc;border-radius:3px;background:#fff;';
+    // don't steal focus from the editable: a button click must not blur the
+    // contenteditable (which would drop the live selection before the op runs).
+    // (Safe for buttons — unlike range inputs, which need the default mousedown
+    // to start a thumb drag, so we never preventDefault those.)
+    el.addEventListener('mousedown', function (e) { e.preventDefault(); });
     return el;
   }
 

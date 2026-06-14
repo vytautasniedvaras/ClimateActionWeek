@@ -190,8 +190,11 @@
       this._warpHost = null;
       this._warpCanvas = null;          // persistent backing store fed to setSourceCanvas
 
-      // selection state (array of word spans)
+      // selection state (array of word spans) — AUTHORITATIVE, decoupled from
+      // the live DOM Selection. Only deliberate in-editable gestures change it;
+      // panel focus never collapses it (see _refreshSelectionFromCaret).
       this._selection = [];
+      this._selectionSnapshot = [];     // last non-empty selection before focusout
       this._anchorWord = null;          // for shift-range extension
       this._dragging = false;           // pointer drag across words
       this._dragAnchor = null;
@@ -246,10 +249,13 @@
     _bindEvents() {
       const ed = this.editable;
 
-      // caret-preserving re-wrap + warp sync on edit
+      // caret-preserving re-wrap + warp sync on edit. A re-wrap rebuilds the
+      // word spans, so we only PRUNE detached entries here — never re-pick the
+      // selection from the caret (that would collapse a multi-word selection
+      // mid-edit). Caret-driven narrowing happens on real key navigation only.
       ed.addEventListener('input', () => {
         this._reWrapAll();
-        this._refreshSelectionFromCaret();
+        this._pruneSelection();
         if (this.isWarped) this._rasterizeIntoWarp();
       });
       ed.addEventListener('keyup', () => this._refreshSelectionFromCaret());
@@ -258,6 +264,13 @@
       ed.addEventListener('mousedown', (e) => this._onWordMouseDown(e));
       ed.addEventListener('mousemove', (e) => this._onWordMouseMove(e));
       window.addEventListener('mouseup', () => { this._dragging = false; });
+
+      // snapshot the selection when focus leaves the editable (e.g. the user
+      // clicks a dev panel's number / hex input). Panel ops call
+      // restoreSelection() so they still target the words that were selected.
+      ed.addEventListener('focusout', () => {
+        if (this._selection.length) this._selectionSnapshot = this._selection.slice();
+      });
 
       // mark this component active for the dev UI's getActive()
       ed.addEventListener('focus', () => { TextComponent._active = this; });
@@ -484,15 +497,23 @@
       this._setSelection(this._rangeBetween(this._dragAnchor, word));
     }
 
-    // keep selection coherent when the caret moves (typing/arrow keys)
-    _refreshSelectionFromCaret() {
-      // drop selection entries whose spans were destroyed by a re-wrap
-      // (innerHTML rebuild) so we never operate on detached, unrendered nodes.
-      const validSelection = this._selection.filter((w) => this.editable.contains(w));
-      if (validSelection.length !== this._selection.length) {
+    // drop selection entries whose spans were destroyed by a re-wrap
+    // (innerHTML rebuild) so we never operate on detached, unrendered nodes.
+    _pruneSelection() {
+      const valid = this._selection.filter((w) => this.editable.contains(w));
+      if (valid.length !== this._selection.length) {
         this._selection.forEach((w) => { if (!this.editable.contains(w)) w.classList.remove('byo-word--selected'); });
-        this._selection = validSelection;
+        this._selection = valid;
       }
+    }
+
+    // keep selection coherent when the caret moves (typing / arrow keys). Prune
+    // detached spans, then follow the caret word — but ONLY when the current
+    // selection is a single word (or empty). A deliberate multi-word selection
+    // is preserved: a stray keyup must never collapse it down to one word.
+    _refreshSelectionFromCaret() {
+      this._pruneSelection();
+      if (this._selection.length > 1) return;
       const sel = window.getSelection();
       if (!sel || sel.rangeCount === 0) return;
       let node = sel.anchorNode;
@@ -505,11 +526,21 @@
       }
     }
 
+    // restore the pre-focusout selection if the live one was lost. Panel ops
+    // (setColor/applyFormat/fill) call this so editing via a focus-stealing
+    // control (number / hex input) still targets the intended words.
+    restoreSelection() {
+      if (this._selection.length || !this._selectionSnapshot.length) return;
+      const valid = this._selectionSnapshot.filter((w) => this.editable.contains(w));
+      if (valid.length) this._setSelection(valid);
+    }
+
     getSelection() { return this._selection.slice(); }
 
     /* ---------------- per-word colour ---------------- */
     setColor(hex) {
       if (!hex) return;
+      this.restoreSelection();
       const words = this._selection.length ? this._selection : this._allWords();
       words.forEach((w) => {
         w.dataset.color = hex;                 // authoritative exact hex
@@ -523,6 +554,7 @@
     /* ---------------- texture fill (background-clip:text per word) ---------------- */
     fillWithTexture(sampleCanvas) {
       if (!sampleCanvas) return;
+      this.restoreSelection();
       const words = this._selection.length ? this._selection : this._allWords();
       words.forEach((w) => this._fillWord(w, sampleCanvas));
       if (this.isWarped) this._rasterizeIntoWarp();
@@ -581,6 +613,7 @@
     }
 
     clearFill() {
+      this.restoreSelection();
       const words = this._selection.length ? this._selection : this._allWords();
       words.forEach((w) => this._unfillWord(w));
       if (this.isWarped) this._rasterizeIntoWarp();
@@ -589,6 +622,7 @@
     /* ---------------- formatting ---------------- */
     applyFormat(fmt) {
       fmt = fmt || {};
+      this.restoreSelection();
       this.format = Object.assign({}, this.format, fmt);
       // format applies to the whole component's editable (font family/weight/
       // spacing/axes are block-level here); BYO.Fonts.apply is the contract.
