@@ -352,6 +352,7 @@
 
       // resize: reposition warp overlay + re-rasterize (fixes shader-resize bug)
       this._onResize = () => {
+        this._applyLayout();   // px layout depends on mount width / viewport height
         if (this.isWarped) {
           this._positionWarpHost();
           if (this.warp && this.warp.resize) this.warp.resize();
@@ -375,7 +376,9 @@
         this.activate();
         this.dock = null;
         if (kind.length === 2) this.pos.anchor = kind;   // grabbed corner is the anchor
-        const vW = Math.max(1, window.innerWidth), vH = Math.max(1, window.innerHeight);
+        // x/width are % of the mount (page container) width; y is % of viewport
+        const vW = Math.max(1, this.mount.getBoundingClientRect().width || window.innerWidth);
+        const vH = Math.max(1, window.innerHeight);
         const s0 = { x: e.clientX, y: e.clientY, xPct: this.pos.xPct, yPct: this.pos.yPct, wPct: this.pos.widthPct };
         this._chrome.classList.add('byo-textcomp__chrome--dragging');
         const onMove = (ev) => {
@@ -428,14 +431,20 @@
       if (TextComponent._onGeometryChange) TextComponent._onGeometryChange(this);
     }
 
-    /* ---------------- layout (free 2D corner-anchor, % of viewport) ---------------- */
+    /* ---------------- layout (free 2D corner-anchor) ----------------
+       Positioned in px relative to the MOUNT (the page container): x/width are
+       % of the mount width, y is % of viewport height. Computing px (not CSS %)
+       lets a narrower mount (mobile breakpoint frame) reflow the boxes so the
+       mobile layout is actually visible. */
     _applyLayout() {
       const s = this.el.style;
+      const mw = Math.max(1, this.mount.getBoundingClientRect().width || window.innerWidth);
+      const vh = Math.max(1, window.innerHeight);
       s.position = 'absolute';
       s.margin = '0';
-      s.left = this.pos.xPct + '%';
-      s.top = this.pos.yPct + '%';
-      s.width = this.pos.widthPct + '%';
+      s.left = (this.pos.xPct / 100 * mw) + 'px';
+      s.top = (this.pos.yPct / 100 * vh) + 'px';
+      s.width = (this.pos.widthPct / 100 * mw) + 'px';
       s.zIndex = String(this.z || 0);
       this._updateMarginViz();
     }
@@ -477,9 +486,10 @@
     // resolve a dock against a reference component's screen rect (called by app)
     applyDockFrom(refRect) {
       if (!this.dock || !refRect) return;
-      const vW = Math.max(1, window.innerWidth), vH = Math.max(1, window.innerHeight);
+      const mr = this.mount.getBoundingClientRect();
+      const vW = Math.max(1, mr.width || window.innerWidth), vH = Math.max(1, window.innerHeight);
       const gap = (this.dock.gapPct || 0);
-      const refXPct = (refRect.left / vW) * 100, refYPct = (refRect.top / vH) * 100;
+      const refXPct = ((refRect.left - mr.left) / vW) * 100, refYPct = ((refRect.top - mr.top) / vH) * 100;
       const refWPct = (refRect.width / vW) * 100, refHPct = (refRect.height / vH) * 100;
       const side = this.dock.side;
       if (side === 'right') { this.pos.xPct = refXPct + refWPct + gap; this.pos.yPct = refYPct; }
